@@ -1,0 +1,7 @@
+[theme]
+primaryColor = "#2ECC71" # Ein modernes Tech-Grün
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#31333F"
+# Streamlit checkt automatisch, ob dein Windows auf Dark- oder Lightmode steht 
+# und passt die Hintergrundfarben entsprechend an!
