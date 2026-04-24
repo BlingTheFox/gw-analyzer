@@ -1,13 +1,18 @@
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
 
+# Streamlit / local app state
 .streamlit/secrets.toml
 .upload_cache/
+.streamlit_run.*.log
 
+# Virtual environments
 .venv/
 venv/
 env/
 
+# OS / editor noise
 .DS_Store
 Thumbs.db

@@ -1,9 +1,15 @@
+.git/
+.streamlit/secrets.toml
+.streamlit_run.*.log
+.upload_cache/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .pytest_cache/
 .mypy_cache/
+.venv/
+venv/
+env/
 .DS_Store
-.git/
-.upload_cache/
+Thumbs.db
