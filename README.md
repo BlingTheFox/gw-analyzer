@@ -80,14 +80,6 @@ python -m streamlit run app.py
 - Remote-URLs mit Zugangsdaten werden abgelehnt. URLs mit Query-Parametern werden in der Sidebar maskiert und nicht in den temporaeren Cache geschrieben.
 - Parallele Auto-Suche nutzt Threads innerhalb des Streamlit-Prozesses. Fuer produktive Mehrnutzer-Deployments sollte zusaetzlich ein globales Job-Limit konfiguriert werden.
 
-## Datenstand vom 24.04.2026
-
-- `Messdaten/Grundwasserdaten.csv`: Messwerte bis `2021-04-23`
-- `Messdaten/Potsdam_3987_gesamt_ab-1893.xlsx`: Wetterdaten bis `2021-01-17`
-- `Messdaten/CPC.PC.csv` und `Messdaten/alle_ergebnisse.csv`: Zusatz-/Ergebnisdaten ohne Datumsachse
-
-Die lokalen Mess- und Wetterdaten sind damit nicht bis zum aktuellen Datum gepflegt. Fuer echte operative Forecasts sollten neuere Grundwasser- und Wetterdaten oder belastbare Remote-Quellen angebunden werden.
-
 ## Docker
 
 Die Beta-Kopie kann direkt als Container gestartet werden:
