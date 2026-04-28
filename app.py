@@ -163,7 +163,7 @@ TEXT = {
         "plot_residuals": "Residuale ueber Zeit",
         "plot_res_hist": "Residual-Histogramm",
         "plot_step": "Schrittantwort",
-        "plot_pulse": "Pulse Response",
+        "plot_pulse": "Impulse Response Function",
         "plot_downsampled": "Diagramm fuer schnelle Darstellung ausgeduennt",
         "observed": "Beobachtet",
         "simulated": "Simuliert",
@@ -173,6 +173,12 @@ TEXT = {
         "days_axis": "Tage",
         "response_axis": "Antwort",
         "download_plot": "Diagramm herunterladen",
+        "simulated_ts_heading": "Simulierte Zeitreihe",
+        "simulated_ts_note": "Zeitreihe aus Beobachtung, Simulation und Residuum fuer das ausgewaehlte Modell.",
+        "show_simulated_series": "Simulierte Zeitreihe anzeigen",
+        "simulated_ts_download": "Simulierte Zeitreihe als CSV herunterladen",
+        "simulated_all_heading": "Simulierte Zeitreihen",
+        "simulated_all_download": "Alle simulierten Zeitreihen als CSV exportieren",
         "result_table": "Ergebnistabelle",
         "compact_table_note": "Die Standardansicht zeigt nur die wichtigsten Spalten.",
         "extended_table": "Erweiterte Tabelle mit Parametern anzeigen",
@@ -403,7 +409,7 @@ TEXT = {
         "plot_residuals": "Residuals over time",
         "plot_res_hist": "Residual histogram",
         "plot_step": "Step response",
-        "plot_pulse": "Pulse response",
+        "plot_pulse": "Impulse response function",
         "plot_downsampled": "Plot downsampled for faster rendering",
         "observed": "Observed",
         "simulated": "Simulated",
@@ -413,6 +419,12 @@ TEXT = {
         "days_axis": "Days",
         "response_axis": "Response",
         "download_plot": "Download plot",
+        "simulated_ts_heading": "Simulated time series",
+        "simulated_ts_note": "Time series with observation, simulation and residual for the selected model.",
+        "show_simulated_series": "Show simulated time series",
+        "simulated_ts_download": "Download simulated time series as CSV",
+        "simulated_all_heading": "Simulated time series",
+        "simulated_all_download": "Export all simulated time series as CSV",
         "result_table": "Result table",
         "compact_table_note": "The default view only shows the most important columns.",
         "extended_table": "Show extended table with parameters",
@@ -1753,6 +1765,36 @@ def figure_to_png_bytes(figure):
     return buffer.getvalue()
 
 
+def build_simulated_timeseries_df(model, station=None):
+    observations = model.observations()
+    simulation = model.simulate(
+        tmin=observations.index.min(),
+        tmax=observations.index.max(),
+    )
+    result = pd.concat(
+        [
+            observations.rename("observed"),
+            simulation.rename("simulated"),
+        ],
+        axis=1,
+    )
+    result["residual"] = result["observed"] - result["simulated"]
+    result = result.reset_index().rename(columns={result.index.name or "index": "date"})
+    if "date" not in result.columns:
+        result = result.rename(columns={result.columns[0]: "date"})
+    result.insert(0, "station", station or model.name)
+    return result
+
+
+def build_all_simulated_timeseries_df(models):
+    frames = []
+    for station, model in models.items():
+        frames.append(build_simulated_timeseries_df(model, station))
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
 def get_station_metadata_row(last_run_df, station):
     if last_run_df.empty:
         return None
@@ -3066,6 +3108,34 @@ with tab_plot:
             key=f"download_{plot_station}_{plot_type}",
         )
         plt.close(figure)
+        with st.expander(t["simulated_ts_heading"], expanded=False):
+            st.caption(t["simulated_ts_note"])
+            if st.checkbox(
+                t["show_simulated_series"],
+                value=True,
+                key=f"show_simulated_series_{plot_station}",
+            ):
+                simulated_ts_df = build_simulated_timeseries_df(
+                    selected_model,
+                    plot_station,
+                )
+                st.dataframe(
+                    simulated_ts_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                simulated_ts_csv = (
+                    sanitize_export_df(simulated_ts_df)
+                    .to_csv(index=False, sep=";")
+                    .encode("utf-8")
+                )
+                st.download_button(
+                    t["simulated_ts_download"],
+                    data=simulated_ts_csv,
+                    file_name=f"{plot_station}_simulated_timeseries.csv",
+                    mime="text/csv",
+                    key=f"download_simulated_timeseries_{plot_station}",
+                )
 
 
 with tab_diagnostics:
@@ -3905,6 +3975,22 @@ with tab_save:
             file_name="gw_report.html",
             mime="text/html",
         )
+
+    if last_run_models:
+        st.markdown(f"### {t['simulated_all_heading']}")
+        all_simulated_df = build_all_simulated_timeseries_df(last_run_models)
+        if not all_simulated_df.empty:
+            all_simulated_csv = (
+                sanitize_export_df(all_simulated_df)
+                .to_csv(index=False, sep=";")
+                .encode("utf-8")
+            )
+            st.download_button(
+                t["simulated_all_download"],
+                data=all_simulated_csv,
+                file_name="simulated_timeseries_all_stations.csv",
+                mime="text/csv",
+            )
 
     imported_file = st.file_uploader(t["import_csv"], type=["csv"], key="import_results")
     if imported_file is not None and st.button(t["import_button"], key="import_results_button"):

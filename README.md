@@ -45,7 +45,9 @@ python -m streamlit run app.py
 - Export der Historie als CSV und als Excel mit mehreren Sheets
 - Historie-Steuerung mit Limit fuer gespeicherte Laeufe und eigenem Leeren-Knopf
 - Optionale Kartenansicht auf Basis einer hochladbaren Koordinatendatei mit `Messstelle/Site`, `Lat`, `Lon`
-- Pulse-Response-Visualisierung zusaetzlich zur Pastas-Schrittantwort
+- Visualisierung der Impulse Response Function zusaetzlich zur Pastas-Step-Function
+- Ausgabe simulierter Zeitreihen je Messstelle mit Beobachtung, Simulation und Residuum
+- Gesamt-CSV-Export aller simulierten Zeitreihen aus dem letzten Modelllauf
 - Forecast-Tab fuer Zukunftsszenarien mit skaliertem Niederschlag/Verdunstung, additiven Offsets und nicht-negativem Clipping
 - Optionaler Open-Meteo-Abruf fuer aktuelle Tageswerte mit `precipitation_sum` und `et0_fao_evapotranspiration`, parametrisierbar ueber Koordinaten, Zeitzone und Forecast-Tage
 - Wetterantrieb im Forecast als eigenes Diagramm und als exportierbare Spalten im Forecast-CSV
@@ -75,6 +77,7 @@ python -m streamlit run app.py
 - Fuer Remote- oder API-Quellen gibt es in der Sidebar einen Button zum erzwungenen Neuladen, damit gecachte Daten gezielt aktualisiert werden koennen.
 - Der Remote-Import ist bewusst auf direkte oeffentliche HTTP(S)-Quellen ohne Redirects sowie auf begrenzte Dateigroessen ausgelegt. Das reduziert Sicherheits- und Stabilitaetsrisiken bei API-/URL-Importen.
 - Die Session-Historie kann im Save-Tab begrenzt oder komplett geleert werden, damit lange Arbeitsrunden nicht unnoetig wachsen.
+- Simulierte Zeitreihen werden aus den gespeicherten Bestmodellen des letzten Laufs erzeugt und koennen stationsweise im Visualisierungs-Tab oder gesammelt im Save-Tab exportiert werden.
 - Forecast ist ein Szenario auf Basis wiederholter historischer Wetterjahre. Open-Meteo-Tageswerte werden optional in den Modellhorizont eingefuegt, ersetzen aber keine vollwertige Klimaprojektion.
 - Remote-Quellen sind praktisch fuer Open-Data-Workflows, brauchen fuer produktive API-Nutzung aber noch sauberes Stationsmapping, Fehlerbehandlung und ein klares Refresh-Konzept.
 - Remote-URLs mit Zugangsdaten werden abgelehnt. URLs mit Query-Parametern werden in der Sidebar maskiert und nicht in den temporaeren Cache geschrieben.
