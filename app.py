@@ -1,4 +1,4 @@
-import io
+﻿import io
 import html
 import ipaddress
 import json
@@ -7,12 +7,14 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import datetime
+from itertools import product
 from pathlib import Path
 from threading import Lock, Thread
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import pastas as ps
 import pydeck as pdk
@@ -20,11 +22,27 @@ import requests
 import streamlit as st
 from pandas.api.types import is_bool_dtype, is_numeric_dtype
 
+from ml_export import (
+    create_ml_run_package,
+    load_ml_artifacts_bytes,
+    ml_results_to_csv_bytes,
+    save_ml_artifacts_bytes,
+)
+from ml_features import build_hybrid_feature_frame, build_hybrid_forecast_feature_frame
+from ml_models import torch_available
+from ml_training import (
+    build_artifacts,
+    metric_summary,
+    predict_hybrid_residuals,
+    predict_impulse_response,
+    train_evaluate_hybrid,
+)
+
 # Project concept and application lead: Robin Carow / RCnet
 # Modeling framework credit: Pastas by Collenteur et al. (2019), https://doi.org/10.1111/gwat.12925
 
 
-st.set_page_config(page_title="GW Analyzer Beta", layout="wide")
+st.set_page_config(page_title="GW Analyzer CNN/LSTM Test Beta", layout="wide")
 
 APP_DIR = Path(__file__).resolve().parent
 UPLOAD_CACHE_DIR = APP_DIR / ".upload_cache"
@@ -33,7 +51,16 @@ MAX_REMOTE_DOWNLOAD_BYTES = 25 * 1024 * 1024
 MAX_ZIP_ENTRY_BYTES = 50 * 1024 * 1024
 MAX_PLOT_POINTS = 2500
 MAX_PARALLEL_WORKERS = 4
+ML_MODEL_TYPES = ["CNN", "LSTM"]
+ML_WINDOW_OPTIONS = [365, 365 * 3, 365 * 5, 365 * 10, 365 * 15, 365 * 20]
+ML_HORIZON_OPTIONS = [1, 7, 30, 90, 180, 365, 365 * 2, 365 * 5, 365 * 10]
+PARAMETER_SEARCH_MAX_COMBINATIONS = 81
 SPREADSHEET_FORMULA_PREFIXES = ("=", "+", "-", "@")
+RESPONSE_MODEL_TYPES = ["Gamma", "Exponential", "Hantush"]
+AUTO_FLEX_OPTIONS = [False, True]
+AUTO_NOISE_OPTIONS = [False, True]
+PROJECT_BUNDLE_VERSION = 1
+SOURCE_KEYS = ["gw", "weather", "extra", "coords"]
 
 
 class JobCancelled(Exception):
@@ -42,8 +69,8 @@ class JobCancelled(Exception):
 
 TEXT = {
     "Deutsch": {
-        "title": "Grundwasser Analyse Tool Beta",
-        "beta_note": "Beta-Arbeitskopie für neue Funktionen.",
+        "title": "Grundwasser Analyse Tool - CNN/LSTM Test Beta",
+        "beta_note": "CNN/LSTM-Test-Beta für den Vergleich von PASTAS ohne FlexModel mit neuronalen Residuenmodellen.",
         "sidebar": "Einstellungen",
         "lang": "Sprache / Language",
         "accessibility": "Barrierefreiheit",
@@ -88,6 +115,14 @@ TEXT = {
         "waiting": "Bitte zuerst die Dateien links in der Sidebar hochladen.",
         "load_error": "Daten konnten nicht geladen werden",
         "no_valid_stations": "Es wurden keine gültigen Messstellen mit mehr als 50 Beobachtungen gefunden.",
+        "project_bundle": "Projekt importieren/exportieren",
+        "project_bundle_note": "Projektpakete enthalten Originaldateien, Ergebnisse, Forecasts und App-Einstellungen.",
+        "project_bundle_export": "Projektpaket exportieren",
+        "project_bundle_import": "Projektpaket importieren",
+        "project_bundle_import_button": "Projektpaket laden",
+        "project_bundle_success": "Projektpaket wurde importiert.",
+        "project_bundle_empty": "Es gibt noch keine Quellen, Ergebnisse oder Einstellungen für ein Projektpaket.",
+        "project_bundle_error": "Projektpaket konnte nicht importiert werden",
         "config_heading": "Konfiguration",
         "mode": "Auswertungsmodus",
         "mode_single": "Einzelne Messstelle",
@@ -100,8 +135,11 @@ TEXT = {
         "run_strategy": "Berechnungsstrategie",
         "strategy_manual": "Ausgewählte Konfiguration berechnen",
         "strategy_auto": "Bestes Modell automatisch suchen",
-        "strategy_auto_note": "Die automatische Suche testet Gamma/Exponential, Flex/ohne Flex und Noise/ohne Noise für jede Messstelle.",
+        "strategy_auto_note": "Die automatische Suche testet Gamma/Exponential/Hantush, Flex/ohne Flex und Noise/ohne Noise für jede Messstelle.",
         "auto_combo_count": "Modellkombinationen pro Messstelle",
+        "auto_exclude_configs": "Modellkombinationen ausschließen",
+        "auto_exclude_help": "Ausgeschlossene Kombinationen werden bei der Bestmodell-Suche übersprungen.",
+        "auto_exclude_all_warning": "Bitte mindestens eine Modellkombination für die Suche aktiv lassen.",
         "performance_box": "Performance-Optionen",
         "parallel_workers": "Parallele Auto-Suche (Worker)",
         "parallel_note": "Parallelisierung läuft stationsweise und ist für größere Auto-Läufe gedacht.",
@@ -113,6 +151,13 @@ TEXT = {
         "parameter_box": "Modellparameter anpassen",
         "parameter_help_manual": "Hier kannst du Startwerte und Optimierung einzelner Parameter für die ausgewählte Konfiguration steuern.",
         "parameter_help_auto": "Die automatische Modellsuche nutzt für jede Modellstruktur passende Standard-Startwerte.",
+        "parameter_search": "Beste Parameter für Station suchen",
+        "parameter_search_note": "Testet mehrere Startwert-Kombinationen für die gewählte Modellstruktur und markiert je Station den besten Lauf.",
+        "parameter_search_params": "Parameter für Startwert-Suche",
+        "parameter_search_multipliers": "Startwert-Faktoren",
+        "parameter_search_invalid_multipliers": "Bitte Startwert-Faktoren als Zahlenliste angeben, z. B. 0.5, 1, 2.",
+        "parameter_search_combo_count": "Parameter-Kombinationen",
+        "parameter_search_too_many": "Die Parameter-Suche ist auf 81 Kombinationen begrenzt. Reduziere Parameter oder Faktoren.",
         "vary": "optimieren",
         "response_cutoff": "Response cutoff",
         "noise_norm": "Noise normalisieren",
@@ -154,7 +199,9 @@ TEXT = {
         "tab_compare": "Vergleich",
         "tab_map": "Karte",
         "tab_forecast": "Forecast",
+        "tab_ml_forecast": "ML Forecast (Beta)",
         "tab_save": "Speichern und Laden",
+        "main_nav": "Ansicht",
         "no_run": "Führe zuerst eine Analyse aus, um Ergebnisse anzuzeigen.",
         "plot_station": "Messstelle für die Visualisierung",
         "plot_type": "Visualisierungsmethode",
@@ -286,10 +333,54 @@ TEXT = {
         "best_model_flag": "Bestes Modell",
         "status": "Status",
         "running_info": "Ein Batch-Lauf ist aktiv. Die Ansicht aktualisiert sich automatisch.",
+        "ml_requires_pastas": "ML-Hybrid braucht ein erfolgreiches Pastas-Modell aus dem letzten Lauf oder Import.",
+        "ml_requires_no_flex": "Für den Vergleich wird ein erfolgreiches PASTAS-Modell ohne FlexModel benötigt.",
+        "ml_torch_missing": "PyTorch ist nicht installiert. Bitte `pip install -r requirements.txt` in dieser CNN/LSTM-Test-Beta ausführen.",
+        "ml_model_type": "Neural-Modell",
+        "ml_model_parallel": "CNN und LSTM werden unabhängig parallel trainiert.",
+        "ml_model_detail": "Detailmodell",
+        "ml_window": "Trainingsfenster",
+        "ml_window_help": "Länge der täglichen Sequenz, die das neuronale Modell als Wetterhistorie sieht. Lange Fenster wie 10, 15 oder 20 Jahre brauchen entsprechend lange Zeitreihen.",
+        "ml_horizon": "Vorhersagehorizont",
+        "ml_horizon_help": "Abstand zwischen Ende des Eingabefensters und Zielwert. Längere Horizonte sind schwerer und reduzieren die Zahl nutzbarer Trainingssequenzen.",
+        "ml_epochs": "Trainings-Epochen",
+        "ml_epochs_help": "Wie oft das Modell den Trainingsblock durchläuft. Mehr Epochen können helfen, erhöhen aber Rechenzeit und Overfitting-Risiko.",
+        "ml_learning_rate": "Lernrate",
+        "ml_learning_rate_help": "Schrittweite der Optimierung. Kleinere Werte trainieren ruhiger, größere Werte schneller, aber instabiler.",
+        "ml_hidden_size": "Hidden Size / Filter",
+        "ml_hidden_size_help": "Größe des LSTM-Speichers bzw. Anzahl der CNN-Filter. Größer ist flexibler, braucht aber mehr Daten.",
+        "ml_split_note": "Fester zeitlicher Split: erste 60 % Training, nächste 20 % Test, letzte 20 % Validierung.",
+        "ml_feature_restriction": "Vergleichssetup: keine vorherigen Grundwasserstände als Features und keine Jahreszeit-Sin/Cos-Features.",
+        "ml_features": "Features",
+        "ml_feature_weather": "Niederschlag und Verdunstung",
+        "ml_feature_weather_help": "Tägliche Niederschlags- und Verdunstungswerte. Das ist der direkteste Vergleich zu den PASTAS-Wetterinputs.",
+        "ml_feature_rollings": "rollierende Wetterfenster",
+        "ml_feature_rollings_help": "Summen/Mittelwerte über 7, 30 und 90 Tage. Das gibt CNN/LSTM gröbere Feuchte- und Trockenheitsinformationen, ohne Grundwasserstände zu verwenden.",
+        "ml_train": "CNN und LSTM trainieren",
+        "ml_test": "Test",
+        "ml_validation": "Validierung",
+        "ml_results_table": "CNN/LSTM-Vergleich",
+        "ml_add_history": "ML-Ergebnis in Historie übernehmen",
+        "ml_added_history": "ML-Ergebnis wurde in die Historie übernommen.",
+        "ml_download_validation": "Validierungsdaten exportieren",
+        "ml_download_package": "ML-Laufpaket exportieren",
+        "ml_summary": "ML-Zusammenfassung",
+        "ml_impulse_heading": "ML-Impulsantwort",
+        "ml_impulse_amount": "Einmaliger Niederschlagsimpuls (mm)",
+        "ml_impulse_amount_help": "Ein künstliches Einzelereignis. Die Verdunstung wird für den gesamten Antwortzeitraum auf 0 gesetzt.",
+        "ml_impulse_days": "Antwortlänge (Tage)",
+        "ml_impulse_days_help": "Zeitraum, über den das Abklingen der Reaktion nach dem Impuls beobachtet wird.",
+        "ml_impulse_run": "Impulsantwort berechnen",
+        "ml_download_impulse": "Impulsantwort als CSV exportieren",
+        "ml_impulse_no_rows": "Für diese Fenster-/Horizont-Kombination konnte keine Impulsantwort berechnet werden.",
+        "ml_future_heading": "Hybrid-Forecast",
+        "ml_future_needs_forecast": "Berechne im Forecast-Tab zuerst ein Pastas-Szenario für dieselbe Station. Danach ergänzt der ML-Tab den Forecast um das gelernte Residuum.",
+        "ml_future_no_rows": "Für das gewählte Trainingsfenster und den Horizont gibt es noch keine vorhersagbaren Zukunftszeilen.",
+        "ml_download_future": "Hybrid-Forecast als CSV exportieren",
     },
     "English": {
-        "title": "Groundwater Analysis Tool Beta",
-        "beta_note": "Beta work copy for new features.",
+        "title": "Groundwater Analysis Tool - CNN/LSTM Test Beta",
+        "beta_note": "CNN/LSTM test beta for comparing PASTAS without FlexModel against neural residual models.",
         "sidebar": "Settings",
         "lang": "Sprache / Language",
         "accessibility": "Accessibility",
@@ -334,6 +425,14 @@ TEXT = {
         "waiting": "Please upload the files in the sidebar first.",
         "load_error": "Data could not be loaded",
         "no_valid_stations": "No valid stations with more than 50 observations were found.",
+        "project_bundle": "Import/export project",
+        "project_bundle_note": "Project bundles contain original files, results, forecasts and app settings.",
+        "project_bundle_export": "Export project bundle",
+        "project_bundle_import": "Import project bundle",
+        "project_bundle_import_button": "Load project bundle",
+        "project_bundle_success": "Project bundle was imported.",
+        "project_bundle_empty": "There are no sources, results or settings for a project bundle yet.",
+        "project_bundle_error": "Project bundle could not be imported",
         "config_heading": "Configuration",
         "mode": "Evaluation mode",
         "mode_single": "Single station",
@@ -346,8 +445,11 @@ TEXT = {
         "run_strategy": "Run strategy",
         "strategy_manual": "Run selected configuration",
         "strategy_auto": "Automatically search for best model",
-        "strategy_auto_note": "Automatic search tests Gamma/Exponential, Flex/no Flex and Noise/no Noise for each station.",
+        "strategy_auto_note": "Automatic search tests Gamma/Exponential/Hantush, Flex/no Flex and Noise/no Noise for each station.",
         "auto_combo_count": "Model combinations per station",
+        "auto_exclude_configs": "Exclude model combinations",
+        "auto_exclude_help": "Excluded combinations are skipped during the best-model search.",
+        "auto_exclude_all_warning": "Please keep at least one model combination active for the search.",
         "performance_box": "Performance options",
         "parallel_workers": "Parallel auto search (workers)",
         "parallel_note": "Parallelization runs by station and is intended for larger auto runs.",
@@ -359,6 +461,13 @@ TEXT = {
         "parameter_box": "Adjust model parameters",
         "parameter_help_manual": "Set initial values and optimization flags for the selected configuration.",
         "parameter_help_auto": "Automatic model search uses suitable default start values for each model structure.",
+        "parameter_search": "Find best parameters for station",
+        "parameter_search_note": "Tests multiple initial-value combinations for the selected model structure and marks the best run per station.",
+        "parameter_search_params": "Parameters for initial-value search",
+        "parameter_search_multipliers": "Initial-value factors",
+        "parameter_search_invalid_multipliers": "Please enter initial-value factors as a numeric list, e.g. 0.5, 1, 2.",
+        "parameter_search_combo_count": "Parameter combinations",
+        "parameter_search_too_many": "Parameter search is limited to 81 combinations. Reduce parameters or factors.",
         "vary": "optimize",
         "response_cutoff": "Response cutoff",
         "noise_norm": "Normalize noise",
@@ -400,7 +509,9 @@ TEXT = {
         "tab_compare": "Comparison",
         "tab_map": "Map",
         "tab_forecast": "Forecast",
+        "tab_ml_forecast": "ML Forecast (Beta)",
         "tab_save": "Save and Load",
+        "main_nav": "View",
         "no_run": "Run an analysis first to show results.",
         "plot_station": "Station for visualization",
         "plot_type": "Visualization method",
@@ -532,6 +643,50 @@ TEXT = {
         "best_model_flag": "Best model",
         "status": "Status",
         "running_info": "A batch job is active. The view refreshes automatically.",
+        "ml_requires_pastas": "ML hybrid needs a successful Pastas model from the last run or import.",
+        "ml_requires_no_flex": "The comparison requires a successful PASTAS model without FlexModel.",
+        "ml_torch_missing": "PyTorch is not installed. Please run `pip install -r requirements.txt` in this CNN/LSTM test beta.",
+        "ml_model_type": "Neural model",
+        "ml_model_parallel": "CNN and LSTM are trained independently in parallel.",
+        "ml_model_detail": "Detail model",
+        "ml_window": "Training window",
+        "ml_window_help": "Length of the daily input sequence seen by the neural model. Long windows such as 10, 15 or 20 years require sufficiently long time series.",
+        "ml_horizon": "Forecast horizon",
+        "ml_horizon_help": "Lead time between the end of the input window and the target value. Longer horizons are harder and reduce the number of usable training sequences.",
+        "ml_epochs": "Training epochs",
+        "ml_epochs_help": "Number of passes over the training block. More epochs may help but increase runtime and overfitting risk.",
+        "ml_learning_rate": "Learning rate",
+        "ml_learning_rate_help": "Optimizer step size. Smaller values train more calmly, larger values faster but less stably.",
+        "ml_hidden_size": "Hidden size / filters",
+        "ml_hidden_size_help": "LSTM memory size or CNN filter count. Larger is more flexible but needs more data.",
+        "ml_split_note": "Fixed temporal split: first 60% training, next 20% test, final 20% validation.",
+        "ml_feature_restriction": "Comparison setup: no previous groundwater heads as features and no seasonal sin/cos features.",
+        "ml_features": "Features",
+        "ml_feature_weather": "Rainfall and evaporation",
+        "ml_feature_weather_help": "Daily rainfall and evaporation values. This is the most direct comparison to the PASTAS weather inputs.",
+        "ml_feature_rollings": "Rolling weather windows",
+        "ml_feature_rollings_help": "7, 30 and 90 day sums/means. This gives CNN/LSTM coarse wetness and dryness information without groundwater heads.",
+        "ml_train": "Train CNN and LSTM",
+        "ml_test": "Test",
+        "ml_validation": "Validation",
+        "ml_results_table": "CNN/LSTM comparison",
+        "ml_add_history": "Add ML result to history",
+        "ml_added_history": "ML result was added to history.",
+        "ml_download_validation": "Export validation data",
+        "ml_download_package": "Export ML run package",
+        "ml_summary": "ML summary",
+        "ml_impulse_heading": "ML impulse response",
+        "ml_impulse_amount": "One-time rainfall impulse (mm)",
+        "ml_impulse_amount_help": "A synthetic single event. Evaporation is set to 0 for the full response period.",
+        "ml_impulse_days": "Response length (days)",
+        "ml_impulse_days_help": "Period over which the decay after the impulse is observed.",
+        "ml_impulse_run": "Compute impulse response",
+        "ml_download_impulse": "Export impulse response as CSV",
+        "ml_impulse_no_rows": "No impulse response could be computed for this window/horizon setup.",
+        "ml_future_heading": "Hybrid forecast",
+        "ml_future_needs_forecast": "Compute a Pastas scenario for the same station in the Forecast tab first. The ML tab can then add the learned residual to that forecast.",
+        "ml_future_no_rows": "The selected training window and horizon do not yield predictable future rows yet.",
+        "ml_download_future": "Export hybrid forecast as CSV",
     },
 }
 
@@ -548,6 +703,12 @@ PARAMETER_TEMPLATES = {
         {"name": "recharge_a", "label": "Exponential a", "initial": 10.0, "vary": True},
         {"name": "recharge_f", "label": "Evaporation factor f", "initial": -1.0, "vary": True},
     ],
+    ("Hantush", False): [
+        {"name": "recharge_A", "label": "Recharge A", "initial": 0.220341, "vary": True},
+        {"name": "recharge_a", "label": "Hantush a", "initial": 100.0, "vary": True},
+        {"name": "recharge_b", "label": "Hantush b", "initial": 1.0, "vary": True},
+        {"name": "recharge_f", "label": "Evaporation factor f", "initial": -1.0, "vary": True},
+    ],
     ("Gamma", True): [
         {"name": "recharge_A", "label": "Recharge A", "initial": 0.906149, "vary": True},
         {"name": "recharge_n", "label": "Gamma n", "initial": 1.0, "vary": True},
@@ -562,6 +723,17 @@ PARAMETER_TEMPLATES = {
     ("Exponential", True): [
         {"name": "recharge_A", "label": "Recharge A", "initial": 0.906149, "vary": True},
         {"name": "recharge_a", "label": "Exponential a", "initial": 10.0, "vary": True},
+        {"name": "recharge_srmax", "label": "Root zone storage srmax", "initial": 250.0, "vary": True},
+        {"name": "recharge_lp", "label": "Soil moisture lp", "initial": 0.25, "vary": False},
+        {"name": "recharge_ks", "label": "Conductivity ks", "initial": 100.0, "vary": True},
+        {"name": "recharge_gamma", "label": "Recharge gamma", "initial": 2.0, "vary": True},
+        {"name": "recharge_kv", "label": "Percolation factor kv", "initial": 1.0, "vary": True},
+        {"name": "recharge_simax", "label": "Interception simax", "initial": 2.0, "vary": False},
+    ],
+    ("Hantush", True): [
+        {"name": "recharge_A", "label": "Recharge A", "initial": 0.906149, "vary": True},
+        {"name": "recharge_a", "label": "Hantush a", "initial": 100.0, "vary": True},
+        {"name": "recharge_b", "label": "Hantush b", "initial": 1.0, "vary": True},
         {"name": "recharge_srmax", "label": "Root zone storage srmax", "initial": 250.0, "vary": True},
         {"name": "recharge_lp", "label": "Soil moisture lp", "initial": 0.25, "vary": False},
         {"name": "recharge_ks", "label": "Conductivity ks", "initial": 100.0, "vary": True},
@@ -606,6 +778,20 @@ if "history_run_limit" not in st.session_state:
     st.session_state.history_run_limit = 15
 if "history_notice" not in st.session_state:
     st.session_state.history_notice = None
+if "pending_project_model_rebuild" not in st.session_state:
+    st.session_state.pending_project_model_rebuild = False
+if "last_ml_validation_df" not in st.session_state:
+    st.session_state.last_ml_validation_df = pd.DataFrame()
+if "last_ml_forecast_df" not in st.session_state:
+    st.session_state.last_ml_forecast_df = pd.DataFrame()
+if "last_ml_impulse_df" not in st.session_state:
+    st.session_state.last_ml_impulse_df = pd.DataFrame()
+if "last_ml_summary_table" not in st.session_state:
+    st.session_state.last_ml_summary_table = pd.DataFrame()
+if "last_ml_summary" not in st.session_state:
+    st.session_state.last_ml_summary = {}
+if "last_ml_artifacts" not in st.session_state:
+    st.session_state.last_ml_artifacts = {}
 
 
 def normalize_station_name(value):
@@ -702,6 +888,18 @@ def save_sources_to_upload_cache(source_entries):
                 "path": str(cache_path),
                 "name": source_value.name,
             }
+        elif isinstance(source_value, (str, Path)):
+            source_path = Path(source_value)
+            if source_path.exists() and source_path.is_file():
+                suffix = source_path.suffix or ".bin"
+                cache_filename = f"{source_key}{suffix}"
+                cache_path = UPLOAD_CACHE_DIR / cache_filename
+                cache_path.write_bytes(source_path.read_bytes())
+                manifest[source_key] = {
+                    "type": "file",
+                    "path": str(cache_path),
+                    "name": source_path.name,
+                }
 
     UPLOAD_CACHE_MANIFEST.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
@@ -749,6 +947,331 @@ def persist_current_sources():
     if not any(source_entries.values()):
         return {}
     return save_sources_to_upload_cache(source_entries)
+
+
+def collect_project_source_entries():
+    source_entries = collect_current_source_entries()
+    cached_sources, _ = resolve_cached_sources()
+    for source_key in SOURCE_KEYS:
+        if not source_entries.get(source_key) and cached_sources.get(source_key) is not None:
+            source_entries[source_key] = cached_sources[source_key]
+    return source_entries
+
+
+def project_setting_keys():
+    exact_keys = {
+        "lang",
+        "font_profile",
+        "text_scale",
+        "high_contrast",
+        "strong_focus",
+        "history_run_limit",
+        "auto_excluded_configs",
+        "parameter_search_enabled",
+        "parameter_search_multipliers",
+        "remote_gw_url",
+        "remote_weather_url",
+        "remote_extra_url",
+        "remote_coords_url",
+    }
+    prefixes = (
+        "forecast_",
+        "parameter_search_params_",
+        "value_",
+        "vary_",
+    )
+    keys = []
+    for key in st.session_state.keys():
+        if key in exact_keys or any(str(key).startswith(prefix) for prefix in prefixes):
+            keys.append(key)
+    return keys
+
+
+def collect_project_settings():
+    settings = {}
+    for key in project_setting_keys():
+        value = st.session_state.get(key)
+        try:
+            json.dumps(value)
+        except TypeError:
+            continue
+        settings[key] = value
+    return settings
+
+
+def apply_project_settings(settings):
+    for key, value in (settings or {}).items():
+        if key.endswith("_upload_file") or key in {"project_bundle_import", "import_results"}:
+            continue
+        st.session_state[key] = value
+
+
+def dataframe_to_project_csv(df):
+    if df is None or df.empty:
+        return None
+    return sanitize_export_df(df).to_csv(index=False, sep=";").encode("utf-8")
+
+
+def safe_bundle_name(name, fallback):
+    cleaned = Path(str(name or "")).name.strip()
+    return cleaned or fallback
+
+
+def get_source_bundle_payload(source_key, source_value):
+    if source_value is None:
+        return None
+
+    if is_remote_source(source_value):
+        raw_bytes, extension_hint = download_remote_bytes(source_value)
+        filename = safe_bundle_name(
+            Path(urlparse(source_value).path).name,
+            f"{source_key}{extension_hint or '.bin'}",
+        )
+        return {
+            "raw_bytes": raw_bytes,
+            "name": filename,
+            "type": "file",
+            "origin": "url",
+            "url": source_value,
+        }
+
+    if hasattr(source_value, "getvalue") and hasattr(source_value, "name"):
+        return {
+            "raw_bytes": source_value.getvalue(),
+            "name": safe_bundle_name(source_value.name, f"{source_key}.bin"),
+            "type": "file",
+            "origin": "upload",
+        }
+
+    if isinstance(source_value, (str, Path)):
+        source_path = Path(source_value)
+        if source_path.exists() and source_path.is_file():
+            return {
+                "raw_bytes": source_path.read_bytes(),
+                "name": safe_bundle_name(source_path.name, f"{source_key}.bin"),
+                "type": "file",
+                "origin": "cache",
+            }
+
+    return None
+
+
+def create_project_bundle():
+    buffer = io.BytesIO()
+    manifest = {
+        "version": PROJECT_BUNDLE_VERSION,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "settings": collect_project_settings(),
+        "last_run_label": st.session_state.get("last_run_label"),
+        "last_extra_match": st.session_state.get("last_extra_match", {}),
+        "last_coord_match": st.session_state.get("last_coord_match", {}),
+        "last_forecast_info": st.session_state.get("last_forecast_info", {}),
+        "last_ml_summary": st.session_state.get("last_ml_summary", {}),
+        "sources": {},
+        "tables": {},
+    }
+
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        table_sources = {
+            "history": st.session_state.get("history", pd.DataFrame()),
+            "last_run_results": st.session_state.get("last_run_results", pd.DataFrame()),
+            "last_forecast_df": st.session_state.get("last_forecast_df", pd.DataFrame()),
+            "last_ml_validation_df": st.session_state.get("last_ml_validation_df", pd.DataFrame()),
+            "last_ml_forecast_df": st.session_state.get("last_ml_forecast_df", pd.DataFrame()),
+            "last_ml_impulse_df": st.session_state.get("last_ml_impulse_df", pd.DataFrame()),
+            "last_ml_summary_table": st.session_state.get("last_ml_summary_table", pd.DataFrame()),
+        }
+        for table_name, df in table_sources.items():
+            csv_bytes = dataframe_to_project_csv(df)
+            if csv_bytes is None:
+                continue
+            archive_path = f"tables/{table_name}.csv"
+            archive.writestr(archive_path, csv_bytes)
+            manifest["tables"][table_name] = archive_path
+
+        for source_key, source_value in collect_project_source_entries().items():
+            if source_value is None:
+                continue
+            try:
+                payload = get_source_bundle_payload(source_key, source_value)
+            except Exception as exc:
+                if is_remote_source(source_value):
+                    manifest["sources"][source_key] = {
+                        "type": "url",
+                        "value": source_value,
+                        "download_error": str(exc),
+                    }
+                continue
+            if payload is None:
+                continue
+            archive_path = f"sources/{source_key}_{safe_bundle_name(payload['name'], source_key + '.bin')}"
+            archive.writestr(archive_path, payload["raw_bytes"])
+            manifest["sources"][source_key] = {
+                "type": "file",
+                "path": archive_path,
+                "name": payload["name"],
+                "origin": payload.get("origin"),
+            }
+            if payload.get("url"):
+                manifest["sources"][source_key]["url"] = payload["url"]
+
+        ml_artifact_bytes = save_ml_artifacts_bytes(st.session_state.get("last_ml_artifacts", {}))
+        if ml_artifact_bytes:
+            archive_path = "ml/model_state.pt"
+            archive.writestr(archive_path, ml_artifact_bytes)
+            manifest["ml_artifacts"] = archive_path
+
+        archive.writestr(
+            "manifest.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+        )
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def read_bundle_csv(archive, manifest, table_name, normalize_results=False):
+    archive_path = manifest.get("tables", {}).get(table_name)
+    if not archive_path:
+        return pd.DataFrame()
+    with archive.open(archive_path) as handle:
+        df = pd.read_csv(handle, sep=";")
+    if table_name in {
+        "last_forecast_df",
+        "last_ml_validation_df",
+        "last_ml_forecast_df",
+        "last_ml_impulse_df",
+    } and "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    return normalize_imported_results(df) if normalize_results else df
+
+
+def install_project_sources(archive, manifest):
+    ensure_upload_cache_dir()
+    clear_upload_cache()
+    cache_manifest = {}
+
+    for source_key in SOURCE_KEYS:
+        entry = manifest.get("sources", {}).get(source_key)
+        if not entry:
+            continue
+        if entry.get("type") == "file" and entry.get("path"):
+            raw_bytes = archive.read(entry["path"])
+            suffix = Path(entry.get("name", "")).suffix or Path(entry["path"]).suffix or ".bin"
+            cache_filename = f"{source_key}{suffix}"
+            cache_path = UPLOAD_CACHE_DIR / cache_filename
+            cache_path.write_bytes(raw_bytes)
+            cache_manifest[source_key] = {
+                "type": "file",
+                "path": str(cache_path),
+                "name": entry.get("name", cache_filename),
+            }
+        elif entry.get("type") == "url" and entry.get("value"):
+            cache_manifest[source_key] = {"type": "url", "value": entry["value"]}
+
+    UPLOAD_CACHE_MANIFEST.write_text(
+        json.dumps(cache_manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return cache_manifest
+
+
+def import_project_bundle(uploaded_file):
+    raw_bytes = uploaded_file.getvalue()
+    with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        apply_project_settings(manifest.get("settings", {}))
+        cache_manifest = install_project_sources(archive, manifest)
+
+        history_df = read_bundle_csv(archive, manifest, "history", normalize_results=True)
+        last_run_df = read_bundle_csv(
+            archive,
+            manifest,
+            "last_run_results",
+            normalize_results=True,
+        )
+        forecast_df = read_bundle_csv(archive, manifest, "last_forecast_df")
+        ml_validation_df = read_bundle_csv(archive, manifest, "last_ml_validation_df")
+        ml_forecast_df = read_bundle_csv(archive, manifest, "last_ml_forecast_df")
+        ml_impulse_df = read_bundle_csv(archive, manifest, "last_ml_impulse_df")
+        ml_summary_table = read_bundle_csv(archive, manifest, "last_ml_summary_table")
+        ml_artifacts = {}
+        if manifest.get("ml_artifacts"):
+            try:
+                ml_artifacts = load_ml_artifacts_bytes(archive.read(manifest["ml_artifacts"]))
+            except Exception:
+                ml_artifacts = {}
+
+    if last_run_df.empty and not history_df.empty:
+        last_run_df, imported_run_label = get_last_imported_run(history_df)
+    else:
+        imported_run_label = manifest.get("last_run_label")
+
+    if history_df.empty and not last_run_df.empty:
+        history_df = last_run_df.copy()
+
+    st.session_state.history = limit_history_runs(
+        history_df,
+        st.session_state.get("history_run_limit", 15),
+    )
+    st.session_state.last_run_results = last_run_df
+    st.session_state.last_run_label = imported_run_label
+    st.session_state.last_run_models = {}
+    st.session_state.last_extra_match = manifest.get("last_extra_match", {})
+    st.session_state.last_coord_match = manifest.get("last_coord_match", {})
+    st.session_state.last_forecast_df = forecast_df
+    st.session_state.last_forecast_info = manifest.get("last_forecast_info", {})
+    st.session_state.last_ml_validation_df = ml_validation_df
+    st.session_state.last_ml_forecast_df = ml_forecast_df
+    st.session_state.last_ml_impulse_df = ml_impulse_df
+    st.session_state.last_ml_summary_table = ml_summary_table
+    st.session_state.last_ml_summary = manifest.get("last_ml_summary", {})
+    st.session_state.last_ml_artifacts = ml_artifacts
+    st.session_state.pending_project_model_rebuild = not last_run_df.empty
+    remote_key_map = {
+        "gw": "remote_gw_url",
+        "weather": "remote_weather_url",
+        "extra": "remote_extra_url",
+        "coords": "remote_coords_url",
+    }
+    for source_key, entry in cache_manifest.items():
+        if entry.get("type") == "file":
+            st.session_state[remote_key_map[source_key]] = ""
+    st.session_state.data_refresh_token += 1
+    load_data.clear()
+
+
+def render_project_bundle_panel(t, expanded=False):
+    with st.expander(t["project_bundle"], expanded=expanded):
+        st.caption(t["project_bundle_note"])
+        project_col1, project_col2 = st.columns(2)
+        with project_col1:
+            bundle_bytes = create_project_bundle()
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.download_button(
+                t["project_bundle_export"],
+                data=bundle_bytes,
+                file_name=f"gw_project_{timestamp}.gwproject",
+                mime="application/zip",
+                key="project_bundle_export_button",
+            )
+        with project_col2:
+            project_file = st.file_uploader(
+                t["project_bundle_import"],
+                type=["gwproject", "zip"],
+                key="project_bundle_import",
+            )
+            if st.button(
+                t["project_bundle_import_button"],
+                key="project_bundle_import_button",
+                disabled=project_file is None,
+            ):
+                try:
+                    import_project_bundle(project_file)
+                    st.session_state.history_notice = ("success", t["project_bundle_success"])
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"{t['project_bundle_error']}: {exc}")
 
 
 def describe_cached_sources(t):
@@ -1098,10 +1621,58 @@ def get_parameter_specs(model_type, use_flex):
     return deepcopy(PARAMETER_TEMPLATES[(model_type, use_flex)])
 
 
+def create_response_function(model_type, response_cutoff):
+    response_functions = {
+        "Gamma": ps.Gamma,
+        "Exponential": ps.Exponential,
+        "Hantush": ps.Hantush,
+    }
+    if model_type not in response_functions:
+        raise ValueError(f"Unsupported response model: {model_type}")
+    return response_functions[model_type](cutoff=float(response_cutoff))
+
+
 def create_config_label(model_type, use_flex, use_noise):
     recharge_label = "Flex" if use_flex else "Linear"
     noise_label = "Noise" if use_noise else "NoNoise"
     return f"{model_type} | {recharge_label} | {noise_label}"
+
+
+def get_auto_configuration_labels():
+    return [
+        create_config_label(model_type, use_flex, use_noise)
+        for model_type in RESPONSE_MODEL_TYPES
+        for use_flex in AUTO_FLEX_OPTIONS
+        for use_noise in AUTO_NOISE_OPTIONS
+    ]
+
+
+def parse_float_list(value, default_values):
+    if not isinstance(value, str) or not value.strip():
+        return list(default_values)
+    numbers = []
+    for part in value.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        numbers.append(float(part))
+    return numbers or list(default_values)
+
+
+def build_parameter_search_values(base_parameter_values, search_parameter_names, multipliers):
+    if not search_parameter_names:
+        return [deepcopy(base_parameter_values)]
+
+    multiplier_sets = [multipliers for _ in search_parameter_names]
+    configurations = []
+    for multiplier_values in product(*multiplier_sets):
+        values = deepcopy(base_parameter_values)
+        for name, multiplier in zip(search_parameter_names, multiplier_values):
+            values[name] = float(base_parameter_values[name]) * float(multiplier)
+        configurations.append(values)
+        if len(configurations) >= PARAMETER_SEARCH_MAX_COMBINATIONS:
+            break
+    return configurations
 
 
 def build_model(
@@ -1117,11 +1688,7 @@ def build_model(
     noise_norm,
 ):
     model = ps.Model(head, name=head.name)
-    response_function = (
-        ps.Gamma(cutoff=response_cutoff)
-        if model_type == "Gamma"
-        else ps.Exponential(cutoff=response_cutoff)
-    )
+    response_function = create_response_function(model_type, response_cutoff)
     recharge_model = ps.rch.FlexModel() if use_flex else ps.rch.Linear()
     stress_model = ps.RechargeModel(rain, evap, rfunc=response_function, recharge=recharge_model)
     model.add_stressmodel(stress_model)
@@ -1159,27 +1726,49 @@ def get_search_configurations(
     response_cutoff,
     noise_norm,
     t,
+    excluded_auto_config_labels=None,
+    parameter_search_enabled=False,
+    parameter_search_names=None,
+    parameter_search_multipliers=None,
 ):
     if run_strategy_label == t["strategy_manual"]:
-        return [
-            {
-                "model_type": manual_model_type,
-                "use_flex": manual_use_flex,
-                "use_noise": manual_use_noise,
-                "parameter_values": deepcopy(manual_parameter_values),
-                "vary_flags": deepcopy(manual_vary_flags),
-                "response_cutoff": response_cutoff,
-                "noise_norm": noise_norm,
-                "configuration_label": create_config_label(
-                    manual_model_type, manual_use_flex, manual_use_noise
-                ),
-            }
-        ]
+        base_label = create_config_label(manual_model_type, manual_use_flex, manual_use_noise)
+        if parameter_search_enabled:
+            parameter_values_list = build_parameter_search_values(
+                manual_parameter_values,
+                parameter_search_names or [],
+                parameter_search_multipliers or [1.0],
+            )
+        else:
+            parameter_values_list = [deepcopy(manual_parameter_values)]
+
+        configurations = []
+        for index, parameter_values in enumerate(parameter_values_list, start=1):
+            label = base_label
+            if parameter_search_enabled and len(parameter_values_list) > 1:
+                label = f"{base_label} | Startset {index}"
+            configurations.append(
+                {
+                    "model_type": manual_model_type,
+                    "use_flex": manual_use_flex,
+                    "use_noise": manual_use_noise,
+                    "parameter_values": deepcopy(parameter_values),
+                    "vary_flags": deepcopy(manual_vary_flags),
+                    "response_cutoff": response_cutoff,
+                    "noise_norm": noise_norm,
+                    "configuration_label": label,
+                }
+            )
+        return configurations
 
     configurations = []
-    for model_type in ["Gamma", "Exponential"]:
-        for use_flex in [False, True]:
-            for use_noise in [False, True]:
+    excluded_auto_config_labels = set(excluded_auto_config_labels or [])
+    for model_type in RESPONSE_MODEL_TYPES:
+        for use_flex in AUTO_FLEX_OPTIONS:
+            for use_noise in AUTO_NOISE_OPTIONS:
+                configuration_label = create_config_label(model_type, use_flex, use_noise)
+                if configuration_label in excluded_auto_config_labels:
+                    continue
                 specs = get_parameter_specs(model_type, use_flex)
                 configurations.append(
                     {
@@ -1194,9 +1783,7 @@ def get_search_configurations(
                         },
                         "response_cutoff": response_cutoff,
                         "noise_norm": noise_norm,
-                        "configuration_label": create_config_label(
-                            model_type, use_flex, use_noise
-                        ),
+                        "configuration_label": configuration_label,
                     }
                 )
     return configurations
@@ -1343,8 +1930,18 @@ def ranking_ascending(metric_name):
 
 
 def get_best_only_rows(df):
-    if "BestStationModel" in df.columns and df["BestStationModel"].astype(bool).any():
-        return df[df["BestStationModel"].astype(bool)].copy()
+    if "BestStationModel" in df.columns:
+        best_flags = df["BestStationModel"].map(
+            lambda value: (
+                value.strip().lower() in {"1", "true", "yes", "ja", "y"}
+                if isinstance(value, str)
+                else bool(value)
+                if pd.notna(value)
+                else False
+            )
+        )
+        if best_flags.any():
+            return df[best_flags].copy()
     return df.copy()
 
 
@@ -1402,7 +1999,13 @@ def get_display_column_labels(t):
         "BestStationModel": t["best_model_flag"],
         "Status": t["status"],
         "n_obs": "n_obs",
-        "R2": "R2",
+        "R2": "R²",
+        "Test_R2": "Test R²",
+        "Test_RMSE": "Test RMSE",
+        "Test_EVP": "Test EVP",
+        "Validation_R2": "Validierung R²",
+        "Validation_RMSE": "Validierung RMSE",
+        "Validation_EVP": "Validierung EVP",
         "RMSE": "RMSE",
         "EVP": "EVP",
         "AIC": "AIC",
@@ -1438,6 +2041,16 @@ def format_date_value(value):
     if value is None or pd.isna(value):
         return "-"
     return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
+def format_duration_days(days, language="Deutsch"):
+    days = int(days)
+    if days >= 365 and days % 365 == 0:
+        years = days // 365
+        if language == "English":
+            return f"{years} year" if years == 1 else f"{years} years"
+        return f"{years} Jahr" if years == 1 else f"{years} Jahre"
+    return f"{days} days" if language == "English" else f"{days} Tage"
 
 
 def data_gap_days(last_date):
@@ -1758,6 +2371,23 @@ def create_station_figure(model, plot_type, t):
     return figure
 
 
+def create_pastas_impulse_response_df(model, impulse_mm):
+    response = model.get_block_response("recharge")
+    response_index = pd.Index(response.index)
+    if isinstance(response_index, pd.TimedeltaIndex):
+        lag_days = response_index / pd.Timedelta(days=1)
+    else:
+        lag_days = pd.to_numeric(pd.Series(response_index), errors="coerce").to_numpy(dtype=float)
+    response_values = pd.to_numeric(pd.Series(response.values), errors="coerce").to_numpy(dtype=float)
+    response_df = pd.DataFrame(
+        {
+            "lag_days": lag_days,
+            "pastas_irf_response": response_values * float(impulse_mm),
+        }
+    )
+    return response_df.dropna().sort_values("lag_days")
+
+
 def figure_to_png_bytes(figure):
     buffer = io.BytesIO()
     figure.savefig(buffer, format="png", dpi=200, bbox_inches="tight")
@@ -1801,14 +2431,53 @@ def get_station_metadata_row(last_run_df, station):
     station_df = last_run_df[last_run_df["Messstelle"] == station].copy()
     if station_df.empty:
         return None
-    if "BestStationModel" in station_df.columns and station_df["BestStationModel"].astype(bool).any():
-        station_df = station_df[station_df["BestStationModel"].astype(bool)]
+    station_df = get_best_only_rows(station_df)
     if "R2" in station_df.columns:
         station_df = station_df.sort_values("R2", ascending=False, na_position="last")
     return station_df.iloc[0]
 
 
+def get_station_no_flex_metadata_row(last_run_df, station):
+    if last_run_df.empty:
+        return None
+    station_df = last_run_df[last_run_df["Messstelle"] == station].copy()
+    if station_df.empty or "Flex" not in station_df.columns:
+        return None
+    if "Status" in station_df.columns:
+        station_df = station_df[station_df["Status"] == "ok"]
+    station_df = station_df[~station_df["Flex"].map(coerce_bool)]
+    if station_df.empty:
+        return None
+    if "R2" in station_df.columns:
+        station_df = station_df.sort_values("R2", ascending=False, na_position="last")
+    return station_df.iloc[0]
+
+
+def get_no_flex_station_options(last_run_df):
+    if last_run_df.empty or "Messstelle" not in last_run_df.columns or "Flex" not in last_run_df.columns:
+        return []
+    result_df = last_run_df.copy()
+    if "Status" in result_df.columns:
+        result_df = result_df[result_df["Status"] == "ok"]
+    result_df = result_df[~result_df["Flex"].map(coerce_bool)]
+    return sorted(result_df["Messstelle"].dropna().astype(str).unique().tolist())
+
+
+def normalize_ml_artifacts(artifacts):
+    if not isinstance(artifacts, dict) or not artifacts:
+        return {}
+    if "model" in artifacts:
+        return {str(artifacts.get("model_type") or "ML"): artifacts}
+    return {
+        str(name): artifact
+        for name, artifact in artifacts.items()
+        if isinstance(artifact, dict) and "model" in artifact
+    }
+
+
 def coerce_bool(value):
+    if pd.isna(value):
+        return False
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "ja", "y"}
     return bool(value)
@@ -1823,6 +2492,149 @@ def get_station_coordinates(station_row):
         if pd.notna(latitude) and pd.notna(longitude):
             return float(latitude), float(longitude)
     return None, None
+
+
+def build_model_from_result_row(station_row, gw_df, rain, evap):
+    station = station_row["Messstelle"]
+    if station not in gw_df.columns:
+        raise ValueError(f"Station not found in groundwater data: {station}")
+
+    head = gw_df[station].dropna()
+    model = ps.Model(head, name=station)
+    cutoff_value = station_row.get("Cutoff", 0.999)
+    if pd.isna(cutoff_value):
+        cutoff_value = 0.999
+    response_function = create_response_function(str(station_row["Modell"]), float(cutoff_value))
+    recharge_model = ps.rch.FlexModel() if coerce_bool(station_row["Flex"]) else ps.rch.Linear()
+    stress_model = ps.RechargeModel(
+        rain,
+        evap,
+        rfunc=response_function,
+        recharge=recharge_model,
+    )
+    model.add_stressmodel(stress_model)
+
+    if coerce_bool(station_row["Noise"]):
+        noise_norm_value = True
+        if "NoiseNorm" in station_row.index and pd.notna(station_row["NoiseNorm"]):
+            noise_norm_value = coerce_bool(station_row["NoiseNorm"])
+        model.add_noisemodel(ps.ArNoiseModel(norm=noise_norm_value))
+
+    for name in model.parameters.index:
+        optimal_col = f"param_opt_{name}"
+        initial_col = f"param_init_{name}"
+        requested_col = f"requested_{name}"
+        if optimal_col in station_row.index and pd.notna(station_row[optimal_col]):
+            value = float(station_row[optimal_col])
+        elif initial_col in station_row.index and pd.notna(station_row[initial_col]):
+            value = float(station_row[initial_col])
+        elif requested_col in station_row.index and pd.notna(station_row[requested_col]):
+            value = float(station_row[requested_col])
+        else:
+            value = float(model.parameters.loc[name, "initial"])
+        model.set_parameter(name, initial=value, vary=False)
+        model.parameters.loc[name, "optimal"] = value
+
+    return model
+
+
+def rebuild_models_from_results(result_df, gw_df, rain, evap):
+    if result_df.empty or "Messstelle" not in result_df.columns:
+        return {}
+    ok_df = result_df[result_df["Status"] == "ok"].copy() if "Status" in result_df.columns else result_df.copy()
+    if ok_df.empty:
+        return {}
+    selected_rows = get_best_only_rows(ok_df)
+    if selected_rows.empty:
+        selected_rows = ok_df
+
+    models = {}
+    for station, station_df in selected_rows.groupby("Messstelle", sort=False):
+        if "R2" in station_df.columns:
+            station_df = station_df.sort_values("R2", ascending=False, na_position="last")
+        try:
+            models[station] = build_model_from_result_row(station_df.iloc[0], gw_df, rain, evap)
+        except Exception:
+            continue
+    return models
+
+
+def normalize_imported_results(imported_df):
+    if imported_df is None or imported_df.empty:
+        return pd.DataFrame()
+
+    normalized = imported_df.copy()
+    normalized = normalized.dropna(how="all")
+
+    bool_columns = {"Flex", "Noise", "BestStationModel", "NoiseNorm"}
+    bool_columns.update(
+        column
+        for column in normalized.columns
+        if column.startswith("requested_vary_") or column.startswith("param_vary_")
+    )
+    for column in bool_columns & set(normalized.columns):
+        normalized[column] = normalized[column].map(
+            lambda value: pd.NA if pd.isna(value) else coerce_bool(value)
+        )
+
+    numeric_columns = {
+        "Cutoff",
+        "n_obs",
+        "R2",
+        "RMSE",
+        "EVP",
+        "AIC",
+        "Latitude",
+        "Longitude",
+    }
+    numeric_columns.update(
+        column
+        for column in normalized.columns
+        if (
+            (
+                column.startswith("requested_")
+                and not column.startswith("requested_vary_")
+            )
+            or column.startswith("param_init_")
+            or column.startswith("param_opt_")
+        )
+    )
+    for column in numeric_columns & set(normalized.columns):
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+
+    if "Run" not in normalized.columns:
+        normalized["Run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if "Status" not in normalized.columns:
+        normalized["Status"] = "ok"
+    if "BestStationModel" not in normalized.columns:
+        normalized["BestStationModel"] = False
+
+    return normalized.reset_index(drop=True)
+
+
+def read_imported_results(uploaded_file):
+    try:
+        imported_df = pd.read_csv(uploaded_file, sep=";")
+        if len(imported_df.columns) == 1 and "," in str(imported_df.columns[0]):
+            uploaded_file.seek(0)
+            imported_df = pd.read_csv(uploaded_file, sep=",")
+    except Exception:
+        uploaded_file.seek(0)
+        imported_df = pd.read_csv(uploaded_file, sep=None, engine="python")
+    return normalize_imported_results(imported_df)
+
+
+def get_last_imported_run(imported_df):
+    if imported_df.empty:
+        return pd.DataFrame(), None
+    if "Run" not in imported_df.columns:
+        return imported_df.copy(), None
+    run_values = imported_df["Run"].dropna().astype(str).tolist()
+    if not run_values:
+        return imported_df.copy(), None
+    run_label = run_values[-1]
+    run_df = imported_df[imported_df["Run"].astype(str) == run_label].copy()
+    return run_df.reset_index(drop=True), run_label
 
 
 def repeat_series_pattern(series, future_index, pattern_years):
@@ -1979,37 +2791,7 @@ def create_forecast_simulation(
     evap_extended = pd.concat([evap, future_evap])
 
     head = gw_df[station].dropna()
-    model = ps.Model(head, name=station)
-    response_function = (
-        ps.Gamma(cutoff=float(station_row["Cutoff"]))
-        if station_row["Modell"] == "Gamma"
-        else ps.Exponential(cutoff=float(station_row["Cutoff"]))
-    )
-    recharge_model = ps.rch.FlexModel() if coerce_bool(station_row["Flex"]) else ps.rch.Linear()
-    stress_model = ps.RechargeModel(
-        rain_extended,
-        evap_extended,
-        rfunc=response_function,
-        recharge=recharge_model,
-    )
-    model.add_stressmodel(stress_model)
-
-    if coerce_bool(station_row["Noise"]):
-        noise_norm_value = True
-        if "NoiseNorm" in station_row.index and pd.notna(station_row["NoiseNorm"]):
-            noise_norm_value = coerce_bool(station_row["NoiseNorm"])
-        model.add_noisemodel(ps.ArNoiseModel(norm=noise_norm_value))
-
-    optimal_values = {}
-    for name in model.parameters.index:
-        optimal_col = f"param_opt_{name}"
-        if optimal_col in station_row.index and pd.notna(station_row[optimal_col]):
-            optimal_values[name] = float(station_row[optimal_col])
-        elif name in model.parameters.index:
-            optimal_values[name] = float(model.parameters.loc[name, "initial"])
-
-    for name, value in optimal_values.items():
-        model.set_parameter(name, initial=float(value), vary=False)
+    model = build_model_from_result_row(station_row, gw_df, rain_extended, evap_extended)
 
     simulation = model.simulate(
         p=model.parameters["initial"].values,
@@ -2404,7 +3186,8 @@ def run_station_configurations(
             )
 
     selected_model = None
-    if run_strategy_label == t["strategy_auto"]:
+    should_select_best = run_strategy_label == t["strategy_auto"] or len(search_configurations) > 1
+    if should_select_best:
         successful_rows = [
             row for row in station_results if row["Status"] == "ok" and row["R2"] is not None
         ]
@@ -2592,6 +3375,10 @@ def render_active_job_status():
 
 t = TEXT[st.session_state.lang]
 
+st.title(t["title"])
+st.caption(t["beta_note"])
+render_project_bundle_panel(t, expanded=not bool(load_upload_cache_manifest()))
+
 
 with st.sidebar:
     st.title(t["sidebar"])
@@ -2664,6 +3451,12 @@ with st.sidebar:
             st.session_state.data_refresh_notice = ("success", t["reload_sources_done"])
             st.session_state.last_forecast_df = pd.DataFrame()
             st.session_state.last_forecast_info = {}
+            st.session_state.last_ml_validation_df = pd.DataFrame()
+            st.session_state.last_ml_forecast_df = pd.DataFrame()
+            st.session_state.last_ml_impulse_df = pd.DataFrame()
+            st.session_state.last_ml_summary_table = pd.DataFrame()
+            st.session_state.last_ml_summary = {}
+            st.session_state.last_ml_artifacts = {}
             st.rerun()
     with st.expander(t["cache_heading"], expanded=False):
         st.caption(t["cache_help"])
@@ -2693,10 +3486,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title(t["title"])
-st.caption(t["beta_note"])
-
-
 active_job = get_job(st.session_state.active_job_id)
 finished_job = consume_finished_job(st.session_state.active_job_id)
 if finished_job is not None:
@@ -2717,6 +3506,12 @@ if finished_job is not None:
     st.session_state.last_coord_match = finished_job["coord_match"]
     st.session_state.last_forecast_df = pd.DataFrame()
     st.session_state.last_forecast_info = {}
+    st.session_state.last_ml_validation_df = pd.DataFrame()
+    st.session_state.last_ml_forecast_df = pd.DataFrame()
+    st.session_state.last_ml_impulse_df = pd.DataFrame()
+    st.session_state.last_ml_summary_table = pd.DataFrame()
+    st.session_state.last_ml_summary = {}
+    st.session_state.last_ml_artifacts = {}
     st.session_state.active_job_id = None
 
     if finished_job["status"] == "completed":
@@ -2815,9 +3610,35 @@ if not stations:
     st.error(t["no_valid_stations"])
     st.stop()
 
+if st.session_state.get("pending_project_model_rebuild") and not st.session_state.last_run_results.empty:
+    st.session_state.last_run_models = rebuild_models_from_results(
+        st.session_state.last_run_results,
+        gw_df,
+        rain,
+        evap,
+    )
+    st.session_state.pending_project_model_rebuild = False
+
+
+main_view_labels = {
+    "plot": t["tab_plot"],
+    "diagnostics": t["tab_diagnostics"],
+    "compare": t["tab_compare"],
+    "map": t["tab_map"],
+    "forecast": t["tab_forecast"],
+    "ml_forecast": t["tab_ml_forecast"],
+    "save": t["tab_save"],
+}
+active_main_view = st.radio(
+    t["main_nav"],
+    options=list(main_view_labels.keys()),
+    format_func=lambda key: main_view_labels[key],
+    horizontal=True,
+    key="active_main_view",
+)
 
 data_status = build_data_status(gw_df, rain, evap)
-with st.expander(t["data_status"], expanded=True):
+with st.expander(t["data_status"], expanded=False):
     st.caption(t["data_status_note"])
     status_cols = st.columns(4)
     status_cols[0].metric(t["data_gw_until"], format_date_value(data_status["gw_last"]))
@@ -2835,13 +3656,20 @@ with st.expander(t["data_status"], expanded=True):
     with st.expander(t["data_quality_table"], expanded=False):
         st.dataframe(
             build_data_quality_table(gw_df),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
 
 st.markdown(f"### {t['config_heading']}")
 
+auto_config_options = get_auto_configuration_labels()
+auto_excluded_config_labels = [
+    label
+    for label in st.session_state.get("auto_excluded_configs", [])
+    if label in auto_config_options
+]
+active_auto_combo_count = len(auto_config_options) - len(auto_excluded_config_labels)
 control_col1, control_col2, control_col3, control_col4, control_col5 = st.columns(5)
 
 with control_col1:
@@ -2869,9 +3697,9 @@ with control_col3:
 
 with control_col4:
     if run_strategy == t["strategy_manual"]:
-        model_type = st.selectbox(t["model"], ["Gamma", "Exponential"])
+        model_type = st.selectbox(t["model"], RESPONSE_MODEL_TYPES)
     else:
-        st.metric(t["auto_combo_count"], 8)
+        st.metric(t["auto_combo_count"], active_auto_combo_count)
         model_type = "Gamma"
 
 with control_col5:
@@ -2891,6 +3719,9 @@ st.caption(f"{t['selection_count']}: {len(selected_station_preview)}")
 
 parameter_values = {}
 vary_flags = {}
+parameter_search_enabled = False
+parameter_search_names = []
+parameter_search_multipliers = [1.0]
 
 manual_specs = get_parameter_specs(model_type, use_flex) if run_strategy == t["strategy_manual"] else []
 
@@ -2931,6 +3762,41 @@ with st.expander(t["parameter_box"], expanded=False):
                     key=f"vary_{model_type}_{use_flex}_{spec['name']}",
                 )
 
+        st.divider()
+        parameter_search_enabled = st.checkbox(
+            t["parameter_search"],
+            value=False,
+            key="parameter_search_enabled",
+        )
+        if parameter_search_enabled:
+            st.caption(t["parameter_search_note"])
+            searchable_parameters = [spec["name"] for spec in manual_specs if spec["vary"]]
+            default_parameters = searchable_parameters[:2]
+            parameter_search_names = st.multiselect(
+                t["parameter_search_params"],
+                searchable_parameters,
+                default=default_parameters,
+                key=f"parameter_search_params_{model_type}_{use_flex}",
+            )
+            multiplier_text = st.text_input(
+                t["parameter_search_multipliers"],
+                value="0.5, 1, 2",
+                key="parameter_search_multipliers",
+            )
+            try:
+                parameter_search_multipliers = parse_float_list(multiplier_text, [1.0])
+            except ValueError:
+                parameter_search_multipliers = [1.0]
+                st.warning(t["parameter_search_invalid_multipliers"])
+            parameter_search_combo_count = (
+                len(parameter_search_multipliers) ** len(parameter_search_names)
+                if parameter_search_names
+                else 1
+            )
+            st.metric(t["parameter_search_combo_count"], parameter_search_combo_count)
+            if parameter_search_combo_count > PARAMETER_SEARCH_MAX_COMBINATIONS:
+                st.warning(t["parameter_search_too_many"])
+
 parallel_workers = 1
 early_stop_enabled = False
 early_stop_r2 = 0.85
@@ -2961,6 +3827,17 @@ with st.expander(t["performance_box"], expanded=False):
             disabled=not early_stop_enabled or run_strategy != t["strategy_auto"],
         )
     st.caption(t["parallel_note"])
+    if run_strategy == t["strategy_auto"]:
+        auto_excluded_config_labels = st.multiselect(
+            t["auto_exclude_configs"],
+            auto_config_options,
+            default=auto_excluded_config_labels,
+            help=t["auto_exclude_help"],
+            key="auto_excluded_configs",
+        )
+        active_auto_combo_count = len(auto_config_options) - len(auto_excluded_config_labels)
+        if active_auto_combo_count <= 0:
+            st.warning(t["auto_exclude_all_warning"])
 
 search_configurations = get_search_configurations(
     run_strategy_label=run_strategy,
@@ -2972,7 +3849,13 @@ search_configurations = get_search_configurations(
     response_cutoff=response_cutoff,
     noise_norm=noise_norm,
     t=t,
+    excluded_auto_config_labels=auto_excluded_config_labels,
+    parameter_search_enabled=parameter_search_enabled,
+    parameter_search_names=parameter_search_names,
+    parameter_search_multipliers=parameter_search_multipliers,
 )
+if not search_configurations:
+    st.warning(t["auto_exclude_all_warning"])
 
 
 run_col1, run_col2 = st.columns([1, 1])
@@ -2980,7 +3863,11 @@ with run_col1:
     if st.button(
         t["run"],
         type="primary",
-        disabled=active_job is not None and active_job["status"] in {"queued", "running"},
+        disabled=(
+            active_job is not None
+            and active_job["status"] in {"queued", "running"}
+        )
+        or not search_configurations,
     ):
         selected_stations = get_selected_stations(
             mode, single_station, multi_stations, stations, t
@@ -3068,19 +3955,7 @@ if not last_run_results.empty:
         )
 
 
-tab_plot, tab_diagnostics, tab_compare, tab_map, tab_forecast, tab_save = st.tabs(
-    [
-        t["tab_plot"],
-        t["tab_diagnostics"],
-        t["tab_compare"],
-        t["tab_map"],
-        t["tab_forecast"],
-        t["tab_save"],
-    ]
-)
-
-
-with tab_plot:
+if active_main_view == "plot":
     if not last_run_models:
         st.info(t["no_run"])
     else:
@@ -3121,7 +3996,7 @@ with tab_plot:
                 )
                 st.dataframe(
                     simulated_ts_df,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
                 simulated_ts_csv = (
@@ -3138,7 +4013,7 @@ with tab_plot:
                 )
 
 
-with tab_diagnostics:
+if active_main_view == "diagnostics":
     if not last_run_models:
         st.info(t["no_run"])
     else:
@@ -3188,16 +4063,16 @@ with tab_diagnostics:
             figure.tight_layout()
             st.pyplot(figure)
             plt.close(figure)
-            st.dataframe(seasonal_error, use_container_width=True, hide_index=True)
+            st.dataframe(seasonal_error, width="stretch", hide_index=True)
 
         cluster_df = build_response_cluster_table(last_run_models)
         if not cluster_df.empty:
             st.markdown(f"#### {t['diag_cluster']}")
             st.caption(t["diag_cluster_note"])
-            st.dataframe(cluster_df.round(4), use_container_width=True, hide_index=True)
+            st.dataframe(cluster_df.round(4), width="stretch", hide_index=True)
 
 
-with tab_compare:
+if active_main_view == "compare":
     st.subheader(t["result_table"])
 
     if st.session_state.history.empty:
@@ -3258,11 +4133,11 @@ with tab_compare:
         compact_columns = get_compact_result_columns(compare_df)
         compact_df = compare_df[compact_columns].copy() if compact_columns else compare_df.copy()
         compact_df = compact_df.rename(columns=get_display_column_labels(t))
-        st.dataframe(compact_df, use_container_width=True, hide_index=True)
+        st.dataframe(compact_df, width="stretch", hide_index=True)
         st.caption(t["compact_table_note"])
 
         with st.expander(t["extended_table"], expanded=False):
-            st.dataframe(compare_df, use_container_width=True, hide_index=True)
+            st.dataframe(compare_df, width="stretch", hide_index=True)
 
         numeric_columns = default_numeric_columns(get_numeric_columns(compare_df))
         if len(numeric_columns) < 1:
@@ -3417,7 +4292,7 @@ with tab_compare:
                         .round(3)
                     )
                     st.markdown(f"#### {t['run_compare_summary']}")
-                    st.dataframe(summary, use_container_width=True, hide_index=True)
+                    st.dataframe(summary, width="stretch", hide_index=True)
 
                     station_pivot = (
                         run_compare_df.pivot_table(
@@ -3430,7 +4305,7 @@ with tab_compare:
                         .rename_axis(None, axis=1)
                     )
                     st.markdown(f"#### {t['run_compare_station']}")
-                    st.dataframe(station_pivot, use_container_width=True, hide_index=True)
+                    st.dataframe(station_pivot, width="stretch", hide_index=True)
 
         if "Fehler" in compare_df.columns:
             error_df = compare_df[
@@ -3441,10 +4316,10 @@ with tab_compare:
                     error_display = error_df[
                         ["Run", "Messstelle", "Konfiguration", "Status", "Fehler"]
                     ].rename(columns=get_display_column_labels(t))
-                    st.dataframe(error_display, use_container_width=True, hide_index=True)
+                    st.dataframe(error_display, width="stretch", hide_index=True)
 
 
-with tab_map:
+if active_main_view == "map":
     if st.session_state.history.empty:
         st.info(t["no_run"])
     else:
@@ -3459,7 +4334,7 @@ with tab_map:
             if map_scope == t["scope_last"] and not last_run_results.empty
             else st.session_state.history.copy()
         )
-        if "BestStationModel" in map_df.columns and map_df["BestStationModel"].astype(bool).any():
+        if "BestStationModel" in map_df.columns:
             map_df = get_best_only_rows(map_df)
         map_df = map_df.dropna(subset=["Latitude", "Longitude"]) if {"Latitude", "Longitude"}.issubset(map_df.columns) else pd.DataFrame()
 
@@ -3544,10 +4419,10 @@ with tab_map:
                     map_df[map_columns].drop_duplicates()
                 ).rename(columns=get_display_column_labels(t))
                 st.markdown(f"### {t['map_table']}")
-                st.dataframe(map_table, use_container_width=True, hide_index=True)
+                st.dataframe(map_table, width="stretch", hide_index=True)
 
 
-with tab_forecast:
+if active_main_view == "forecast":
     if not last_run_models or last_run_results.empty:
         st.info(t["forecast_missing"])
     else:
@@ -3830,6 +4705,7 @@ with tab_forecast:
                     forecast_info.update(run_forecast_info)
                     st.session_state.last_forecast_df = forecast_df
                     st.session_state.last_forecast_info = forecast_info
+                    st.session_state.last_ml_forecast_df = pd.DataFrame()
                 except Exception as exc:
                     st.error(f"{t['job_failed']}: {exc}")
 
@@ -3905,7 +4781,7 @@ with tab_forecast:
             st.markdown(f"### {t['forecast_weather_table']}")
             st.dataframe(
                 forecast_df.tail(30),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
             forecast_csv = sanitize_export_df(forecast_df).to_csv(index=False, sep=";").encode("utf-8")
@@ -3917,7 +4793,535 @@ with tab_forecast:
             )
 
 
-with tab_save:
+if active_main_view == "ml_forecast":
+    if not last_run_models or last_run_results.empty:
+        st.info(t["ml_requires_pastas"])
+    elif not torch_available():
+        st.warning(t["ml_torch_missing"])
+    else:
+        no_flex_station_options = get_no_flex_station_options(last_run_results)
+        if not no_flex_station_options:
+            st.info(t["ml_requires_no_flex"])
+        else:
+            ml_station = st.selectbox(
+                t["forecast_station"],
+                no_flex_station_options,
+                key="ml_station_select",
+            )
+            ml_station_row = get_station_no_flex_metadata_row(last_run_results, ml_station)
+            try:
+                ml_model = build_model_from_result_row(ml_station_row, gw_df, rain, evap)
+            except Exception as exc:
+                ml_model = None
+                st.error(str(exc))
+
+            if ml_model is not None:
+                st.caption(t["ml_model_parallel"])
+                ml_control_cols = st.columns(4)
+                with ml_control_cols[0]:
+                    ml_window = st.selectbox(
+                        t["ml_window"],
+                        ML_WINDOW_OPTIONS,
+                        index=2,
+                        key="ml_window",
+                        format_func=lambda days: format_duration_days(days, st.session_state.lang),
+                        help=t["ml_window_help"],
+                    )
+                with ml_control_cols[1]:
+                    ml_horizon = st.selectbox(
+                        t["ml_horizon"],
+                        ML_HORIZON_OPTIONS,
+                        index=2,
+                        key="ml_horizon",
+                        format_func=lambda days: format_duration_days(days, st.session_state.lang),
+                        help=t["ml_horizon_help"],
+                    )
+                with ml_control_cols[2]:
+                    ml_epochs = st.number_input(
+                        t["ml_epochs"],
+                        min_value=5,
+                        max_value=500,
+                        value=60,
+                        step=5,
+                        help=t["ml_epochs_help"],
+                    )
+                with ml_control_cols[3]:
+                    ml_hidden_size = st.selectbox(
+                        t["ml_hidden_size"],
+                        [16, 32, 64, 128],
+                        index=1,
+                        help=t["ml_hidden_size_help"],
+                    )
+                ml_learning_rate = st.selectbox(
+                    t["ml_learning_rate"],
+                    [0.0005, 0.001, 0.002, 0.005],
+                    index=1,
+                    format_func=lambda value: f"{value:g}",
+                    help=t["ml_learning_rate_help"],
+                )
+
+                st.caption(t["ml_split_note"])
+                st.caption(t["ml_feature_restriction"])
+                st.markdown(f"#### {t['ml_features']}")
+                feature_cols = st.columns(2)
+                with feature_cols[0]:
+                    ml_include_weather = st.checkbox(
+                        t["ml_feature_weather"],
+                        value=True,
+                        help=t["ml_feature_weather_help"],
+                    )
+                with feature_cols[1]:
+                    ml_include_rollings = st.checkbox(
+                        t["ml_feature_rollings"],
+                        value=True,
+                        help=t["ml_feature_rollings_help"],
+                    )
+
+                if st.button(t["ml_train"], type="primary", key="train_ml_hybrid"):
+                    try:
+                        feature_frame = build_hybrid_feature_frame(
+                            station=ml_station,
+                            gw_df=gw_df,
+                            rain=rain,
+                            evap=evap,
+                            pastas_model=ml_model,
+                            include_head=False,
+                            include_weather=ml_include_weather,
+                            include_rollings=ml_include_rollings,
+                            include_season=False,
+                        )
+                        feature_columns = [
+                            column
+                            for column in feature_frame.columns
+                            if column not in {"observed", "pastas_sim", "target_residual", "head_filled"}
+                        ]
+                        training_results = {}
+                        training_errors = {}
+                        with st.spinner(t["computing"]):
+                            with ThreadPoolExecutor(max_workers=len(ML_MODEL_TYPES)) as executor:
+                                futures = {
+                                    executor.submit(
+                                        train_evaluate_hybrid,
+                                        feature_frame,
+                                        feature_columns,
+                                        model_type=model_type,
+                                        window_size=ml_window,
+                                        horizon=ml_horizon,
+                                        train_fraction=0.6,
+                                        epochs=int(ml_epochs),
+                                        learning_rate=float(ml_learning_rate),
+                                        hidden_size=int(ml_hidden_size),
+                                    ): model_type
+                                    for model_type in ML_MODEL_TYPES
+                                }
+                                for future in as_completed(futures):
+                                    model_type = futures[future]
+                                    try:
+                                        training_results[model_type] = future.result()
+                                    except Exception as exc:
+                                        training_errors[model_type] = str(exc)
+
+                        for model_type, error_message in training_errors.items():
+                            st.warning(f"{model_type}: {error_message}")
+                        if not training_results:
+                            raise RuntimeError("CNN und LSTM konnten nicht trainiert werden.")
+
+                        evaluation_frames = []
+                        summary_rows = []
+                        artifact_store = {}
+                        for model_type in ML_MODEL_TYPES:
+                            if model_type not in training_results:
+                                continue
+                            result = training_results[model_type]
+                            evaluation_df = result["evaluation"].copy()
+                            evaluation_df["NeuralModel"] = model_type
+                            evaluation_frames.append(evaluation_df)
+                            test_metrics = result["test_metrics"]
+                            validation_metrics = result["validation_metrics"]
+                            summary_rows.append(
+                                {
+                                    "NeuralModel": model_type,
+                                    "R² Test": test_metrics["R2"],
+                                    "RMSE Test": test_metrics["RMSE"],
+                                    "EVP Test": test_metrics["EVP"],
+                                    "R² Validierung": validation_metrics["R2"],
+                                    "RMSE Validierung": validation_metrics["RMSE"],
+                                    "EVP Validierung": validation_metrics["EVP"],
+                                    "Train": result["n_train"],
+                                    "Test": result["n_test"],
+                                    "Validierung": result["n_valid"],
+                                }
+                            )
+                            artifact = build_artifacts(
+                                result,
+                                model_type,
+                                ml_window,
+                                ml_horizon,
+                                ml_hidden_size,
+                            )
+                            artifact["station"] = ml_station
+                            artifact_store[model_type] = artifact
+
+                        validation_df = pd.concat(evaluation_frames, ignore_index=True)
+                        summary_table = pd.DataFrame(summary_rows)
+                        selected_summary_row = summary_table.sort_values(
+                            "R² Validierung",
+                            ascending=False,
+                            na_position="last",
+                        ).iloc[0]
+                        run_label = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        st.session_state.last_ml_validation_df = validation_df
+                        st.session_state.last_ml_summary_table = summary_table
+                        st.session_state.last_ml_summary = {
+                            "Run": run_label,
+                            "Messstelle": ml_station,
+                            "Modell": "Pastas ohne Flex + CNN/LSTM parallel",
+                            "BestesNeuralModell": selected_summary_row["NeuralModel"],
+                            "Fenster": int(ml_window),
+                            "Horizont": int(ml_horizon),
+                            "Split": "60/20/20",
+                            "Features": ", ".join(feature_columns),
+                            "R2": selected_summary_row["R² Validierung"],
+                            "RMSE": selected_summary_row["RMSE Validierung"],
+                            "EVP": selected_summary_row["EVP Validierung"],
+                            "Test_R2": selected_summary_row["R² Test"],
+                            "Test_RMSE": selected_summary_row["RMSE Test"],
+                            "Test_EVP": selected_summary_row["EVP Test"],
+                            "n_train": int(selected_summary_row["Train"]),
+                            "n_test": int(selected_summary_row["Test"]),
+                            "n_valid": int(selected_summary_row["Validierung"]),
+                        }
+                        st.session_state.last_ml_artifacts = artifact_store
+                        st.session_state.last_ml_forecast_df = pd.DataFrame()
+                        st.session_state.last_ml_impulse_df = pd.DataFrame()
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+
+                ml_validation_df = st.session_state.last_ml_validation_df.copy()
+                ml_summary = st.session_state.last_ml_summary
+                if ml_summary and not ml_validation_df.empty:
+                    st.markdown(f"### {t['ml_summary']}")
+                    summary_table = st.session_state.last_ml_summary_table.copy()
+                    if summary_table.empty and "NeuralModel" in ml_validation_df.columns:
+                        summary_rows = []
+                        for model_type, model_df in ml_validation_df.groupby("NeuralModel", sort=False):
+                            test_df = model_df[model_df["split"].astype(str) == "test"]
+                            valid_df = model_df[model_df["split"].astype(str) == "validation"]
+                            summary_rows.append(
+                                {
+                                    "NeuralModel": model_type,
+                                    "R² Test": metric_summary(
+                                        test_df["observed"].values,
+                                        test_df["hybrid_prediction"].values,
+                                    )["R2"],
+                                    "R² Validierung": metric_summary(
+                                        valid_df["observed"].values,
+                                        valid_df["hybrid_prediction"].values,
+                                    )["R2"],
+                                }
+                            )
+                        summary_table = pd.DataFrame(summary_rows)
+                    if not summary_table.empty:
+                        st.markdown(f"#### {t['ml_results_table']}")
+                        st.dataframe(summary_table, width="stretch", hide_index=True)
+                    available_ml_models = (
+                        summary_table["NeuralModel"].astype(str).tolist()
+                        if not summary_table.empty and "NeuralModel" in summary_table.columns
+                        else sorted(ml_validation_df.get("NeuralModel", pd.Series(["ML"])).astype(str).unique())
+                    )
+                    preferred_model = str(ml_summary.get("BestesNeuralModell") or available_ml_models[0])
+                    detail_index = available_ml_models.index(preferred_model) if preferred_model in available_ml_models else 0
+                    selected_ml_model = st.selectbox(
+                        t["ml_model_detail"],
+                        available_ml_models,
+                        index=detail_index,
+                        key="ml_detail_model",
+                    )
+                    selected_summary = (
+                        summary_table[summary_table["NeuralModel"].astype(str) == str(selected_ml_model)]
+                        if not summary_table.empty and "NeuralModel" in summary_table.columns
+                        else pd.DataFrame()
+                    )
+                    selected_summary_row = selected_summary.iloc[0] if not selected_summary.empty else pd.Series(dtype=object)
+                    if not selected_summary_row.empty:
+                        metric_cols = st.columns(6)
+                        metric_cols[0].metric(f"R² {t['ml_test']}", f"{float(selected_summary_row.get('R² Test', float('nan'))):.3f}")
+                        metric_cols[1].metric(f"RMSE {t['ml_test']}", f"{float(selected_summary_row.get('RMSE Test', float('nan'))):.3f}")
+                        metric_cols[2].metric(f"EVP {t['ml_test']}", f"{float(selected_summary_row.get('EVP Test', float('nan'))):.1f}")
+                        metric_cols[3].metric(f"R² {t['ml_validation']}", f"{float(selected_summary_row.get('R² Validierung', float('nan'))):.3f}")
+                        metric_cols[4].metric(f"RMSE {t['ml_validation']}", f"{float(selected_summary_row.get('RMSE Validierung', float('nan'))):.3f}")
+                        metric_cols[5].metric(f"EVP {t['ml_validation']}", f"{float(selected_summary_row.get('EVP Validierung', float('nan'))):.1f}")
+                    count_cols = st.columns(3)
+                    count_cols[0].metric("Train", int(ml_summary.get("n_train", 0)))
+                    count_cols[1].metric(t["ml_test"], int(ml_summary.get("n_test", 0)))
+                    count_cols[2].metric(t["ml_validation"], int(ml_summary.get("n_valid", 0)))
+
+                    plot_df = ml_validation_df.copy()
+                    if "NeuralModel" in plot_df.columns:
+                        plot_df = plot_df[plot_df["NeuralModel"].astype(str) == str(selected_ml_model)]
+                    plot_df["date"] = pd.to_datetime(plot_df["date"], errors="coerce")
+                    figure, axis = plt.subplots(figsize=(12, 5))
+                    axis.plot(plot_df["date"], plot_df["observed"], label=t["observed"], linewidth=1.2)
+                    if "pastas_sim" in plot_df.columns:
+                        axis.plot(plot_df["date"], plot_df["pastas_sim"], label="Pastas ohne Flex", linewidth=1.0)
+                    axis.plot(
+                        plot_df["date"],
+                        plot_df["hybrid_prediction"],
+                        label=f"Pastas + {selected_ml_model}",
+                        linewidth=1.1,
+                    )
+                    if "split" in plot_df.columns:
+                        validation_start = plot_df.loc[
+                            plot_df["split"].astype(str) == "validation",
+                            "date",
+                        ].min()
+                        if pd.notna(validation_start):
+                            axis.axvline(validation_start, color="black", linewidth=0.9, linestyle="--", alpha=0.6)
+                    axis.set_title(f"{ml_summary.get('Messstelle')}: {t['ml_validation']}")
+                    axis.set_ylabel(t["head_axis"])
+                    axis.grid(alpha=0.3)
+                    axis.legend()
+                    figure.tight_layout()
+                    st.pyplot(figure)
+                    plt.close(figure)
+
+                    st.dataframe(plot_df, width="stretch", hide_index=True)
+
+                    summary_station = ml_summary.get("Messstelle")
+                    ml_summary_station_row = get_station_no_flex_metadata_row(last_run_results, summary_station)
+                    ml_artifacts_by_model = normalize_ml_artifacts(st.session_state.get("last_ml_artifacts", {}))
+                    ml_artifacts = ml_artifacts_by_model.get(selected_ml_model, {})
+
+                    st.markdown(f"### {t['ml_impulse_heading']}")
+                    impulse_cols = st.columns(3)
+                    with impulse_cols[0]:
+                        impulse_mm = st.number_input(
+                            t["ml_impulse_amount"],
+                            min_value=0.1,
+                            max_value=500.0,
+                            value=25.0,
+                            step=1.0,
+                            help=t["ml_impulse_amount_help"],
+                        )
+                    with impulse_cols[1]:
+                        impulse_days = st.number_input(
+                            t["ml_impulse_days"],
+                            min_value=30,
+                            max_value=3650,
+                            value=730,
+                            step=30,
+                            help=t["ml_impulse_days_help"],
+                        )
+                    with impulse_cols[2]:
+                        compute_impulse = st.button(t["ml_impulse_run"], key="ml_impulse_button")
+
+                    if compute_impulse:
+                        impulse_df = predict_impulse_response(
+                            ml_artifacts,
+                            impulse_mm=float(impulse_mm),
+                            response_days=int(impulse_days),
+                        )
+                        if impulse_df.empty:
+                            st.info(t["ml_impulse_no_rows"])
+                        else:
+                            pastas_irf = create_pastas_impulse_response_df(ml_model, impulse_mm)
+                            if pastas_irf.empty:
+                                impulse_df["pastas_irf_response"] = np.nan
+                            else:
+                                impulse_df["pastas_irf_response"] = np.interp(
+                                    impulse_df["lag_days"].astype(float),
+                                    pastas_irf["lag_days"].astype(float),
+                                    pastas_irf["pastas_irf_response"].astype(float),
+                                    left=0.0,
+                                    right=0.0,
+                                )
+                            impulse_df["hybrid_response"] = (
+                                impulse_df["pastas_irf_response"].fillna(0.0)
+                                + impulse_df["ml_residual_response"]
+                            )
+                            impulse_df["station"] = summary_station
+                            impulse_df["model"] = f"Pastas ohne Flex + {selected_ml_model}"
+                            impulse_df["evap"] = 0.0
+                            st.session_state.last_ml_impulse_df = impulse_df
+                            st.rerun()
+
+                    ml_impulse_df = st.session_state.last_ml_impulse_df.copy()
+                    if not ml_impulse_df.empty and "station" in ml_impulse_df.columns:
+                        ml_impulse_df = ml_impulse_df[
+                            ml_impulse_df["station"].astype(str) == str(summary_station)
+                        ]
+                    if not ml_impulse_df.empty and "model" in ml_impulse_df.columns:
+                        ml_impulse_df = ml_impulse_df[
+                            ml_impulse_df["model"].astype(str) == f"Pastas ohne Flex + {selected_ml_model}"
+                        ]
+                    if not ml_impulse_df.empty:
+                        figure, axis = plt.subplots(figsize=(12, 5))
+                        axis.plot(
+                            ml_impulse_df["lag_days"],
+                            ml_impulse_df["pastas_irf_response"],
+                            label="Pastas IRF ohne Flex",
+                            linewidth=1.2,
+                        )
+                        axis.plot(
+                            ml_impulse_df["lag_days"],
+                            ml_impulse_df["ml_residual_response"],
+                            label="ML-Residuum",
+                            linewidth=1.1,
+                        )
+                        axis.plot(
+                            ml_impulse_df["lag_days"],
+                            ml_impulse_df["hybrid_response"],
+                            label=f"Pastas + {selected_ml_model}",
+                            linewidth=1.1,
+                        )
+                        axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.7)
+                        axis.set_xlabel(t["days_axis"])
+                        axis.set_ylabel(t["response_axis"])
+                        axis.grid(alpha=0.3)
+                        axis.legend()
+                        figure.tight_layout()
+                        st.pyplot(figure)
+                        plt.close(figure)
+                        st.dataframe(ml_impulse_df, width="stretch", hide_index=True)
+                        st.download_button(
+                            t["ml_download_impulse"],
+                            data=ml_results_to_csv_bytes(sanitize_export_df(ml_impulse_df)),
+                            file_name=f"{summary_station}_ml_impulse_response.csv",
+                            mime="text/csv",
+                        )
+
+                    ml_future_df = st.session_state.last_ml_forecast_df.copy()
+                    if not ml_future_df.empty and "NeuralModel" in ml_future_df.columns:
+                        ml_future_df = ml_future_df[
+                            ml_future_df["NeuralModel"].astype(str) == str(selected_ml_model)
+                        ]
+                    forecast_source_df = st.session_state.last_forecast_df.copy()
+                    if (
+                        ml_artifacts
+                        and summary_station
+                        and ml_artifacts.get("station") == summary_station
+                        and not forecast_source_df.empty
+                    ):
+                        forecast_source_df["date"] = pd.to_datetime(forecast_source_df["date"], errors="coerce")
+                        forecast_source_df = forecast_source_df.dropna(subset=["date"])
+                        if "station" in forecast_source_df.columns:
+                            forecast_source_df = forecast_source_df[
+                                forecast_source_df["station"].astype(str) == str(summary_station)
+                            ]
+                        if not forecast_source_df.empty:
+                            forecast_frame = build_hybrid_forecast_feature_frame(
+                                summary_station,
+                                gw_df,
+                                forecast_source_df,
+                            )
+                            residual_forecast_df = predict_hybrid_residuals(forecast_frame, ml_artifacts)
+                            if not residual_forecast_df.empty:
+                                ml_future_df = forecast_source_df.merge(
+                                    residual_forecast_df,
+                                    on="date",
+                                    how="left",
+                                )
+                                ml_future_df["hybrid_prediction"] = (
+                                    ml_future_df["simulated_head"] + ml_future_df["ml_residual_pred"]
+                                )
+                                if "is_forecast" in ml_future_df.columns:
+                                    ml_future_df = ml_future_df[
+                                        ml_future_df["is_forecast"].apply(coerce_bool)
+                                    ]
+                                ml_future_df = ml_future_df.dropna(subset=["hybrid_prediction"])
+                                ml_future_df["NeuralModel"] = selected_ml_model
+                                st.session_state.last_ml_forecast_df = ml_future_df
+
+                    if not ml_future_df.empty:
+                        st.markdown(f"### {t['ml_future_heading']}")
+                        future_plot_df = ml_future_df.copy()
+                        future_plot_df["date"] = pd.to_datetime(future_plot_df["date"], errors="coerce")
+                        figure, axis = plt.subplots(figsize=(12, 5))
+                        axis.plot(
+                            future_plot_df["date"],
+                            future_plot_df["simulated_head"],
+                            label="Pastas ohne Flex",
+                            linewidth=1.0,
+                        )
+                        axis.plot(
+                            future_plot_df["date"],
+                            future_plot_df["hybrid_prediction"],
+                            label=f"Pastas + {selected_ml_model}",
+                            linewidth=1.1,
+                        )
+                        axis.set_title(f"{summary_station}: {t['ml_future_heading']}")
+                        axis.set_ylabel(t["head_axis"])
+                        axis.grid(alpha=0.3)
+                        axis.legend()
+                        figure.tight_layout()
+                        st.pyplot(figure)
+                        plt.close(figure)
+                        st.dataframe(future_plot_df, width="stretch", hide_index=True)
+                        st.download_button(
+                            t["ml_download_future"],
+                            data=ml_results_to_csv_bytes(sanitize_export_df(future_plot_df)),
+                            file_name=f"{summary_station}_ml_hybrid_forecast.csv",
+                            mime="text/csv",
+                        )
+                    elif forecast_source_df.empty:
+                        st.info(t["ml_future_needs_forecast"])
+                    elif ml_artifacts and ml_artifacts.get("station") == summary_station:
+                        st.info(t["ml_future_no_rows"])
+
+                    st.download_button(
+                        t["ml_download_validation"],
+                        data=ml_results_to_csv_bytes(plot_df),
+                        file_name=f"{ml_summary.get('Messstelle')}_ml_validation.csv",
+                        mime="text/csv",
+                    )
+                    st.download_button(
+                        t["ml_download_package"],
+                        data=create_ml_run_package(
+                            validation_df=plot_df,
+                            metadata=ml_summary,
+                            forecast_df=ml_future_df,
+                            impulse_df=st.session_state.get("last_ml_impulse_df", pd.DataFrame()),
+                            artifacts=ml_artifacts_by_model,
+                            summary_df=summary_table,
+                        ),
+                        file_name=f"{ml_summary.get('Messstelle')}_ml_run.gwml",
+                        mime="application/zip",
+                    )
+
+                    if st.button(t["ml_add_history"], key="ml_add_history_button"):
+                        ml_history_row = {
+                            "Run": ml_summary.get("Run"),
+                            "Messstelle": ml_summary.get("Messstelle"),
+                            "Modus": "ML Hybrid",
+                            "Suchmodus": "Pastas ohne Flex + ML Residuen",
+                            "Konfiguration": (
+                                f"Pastas ohne Flex + {selected_ml_model} | "
+                                f"{ml_summary.get('Fenster')}d -> {ml_summary.get('Horizont')}d"
+                            ),
+                            "Modell": f"Pastas ohne Flex + {selected_ml_model}",
+                            "Flex": False,
+                            "Noise": None if ml_summary_station_row is None else ml_summary_station_row.get("Noise"),
+                            "Cutoff": None if ml_summary_station_row is None else ml_summary_station_row.get("Cutoff"),
+                            "NoiseNorm": None if ml_summary_station_row is None else ml_summary_station_row.get("NoiseNorm"),
+                            "n_obs": len(plot_df),
+                            "Status": "ok",
+                            "BestStationModel": True,
+                            "R2": selected_summary_row.get("R² Validierung", ml_summary.get("R2")),
+                            "RMSE": selected_summary_row.get("RMSE Validierung", ml_summary.get("RMSE")),
+                            "EVP": selected_summary_row.get("EVP Validierung", ml_summary.get("EVP")),
+                            "AIC": None,
+                            "Fehler": None,
+                        }
+                        st.session_state.history = append_history_entries(
+                            st.session_state.history,
+                            pd.DataFrame([ml_history_row]),
+                            st.session_state.history_run_limit,
+                        )
+                        st.success(t["ml_added_history"])
+
+
+if active_main_view == "save":
     st.markdown(f"### {t['history_heading']}")
     history_col1, history_col2 = st.columns(2)
     with history_col1:
@@ -3994,10 +5398,31 @@ with tab_save:
 
     imported_file = st.file_uploader(t["import_csv"], type=["csv"], key="import_results")
     if imported_file is not None and st.button(t["import_button"], key="import_results_button"):
-        imported_df = pd.read_csv(imported_file, sep=";")
+        imported_df = read_imported_results(imported_file)
+        imported_last_run, imported_run_label = get_last_imported_run(imported_df)
         st.session_state.history = append_history_entries(
             st.session_state.history,
             imported_df,
             st.session_state.history_run_limit,
         )
-        st.success(t["import_success"])
+        st.session_state.last_run_results = imported_last_run
+        st.session_state.last_run_label = imported_run_label
+        st.session_state.last_run_models = rebuild_models_from_results(
+            imported_last_run,
+            gw_df,
+            rain,
+            evap,
+        )
+        st.session_state.last_extra_match = {}
+        st.session_state.last_coord_match = {}
+        st.session_state.last_forecast_df = pd.DataFrame()
+        st.session_state.last_forecast_info = {}
+        st.session_state.last_ml_validation_df = pd.DataFrame()
+        st.session_state.last_ml_forecast_df = pd.DataFrame()
+        st.session_state.last_ml_impulse_df = pd.DataFrame()
+        st.session_state.last_ml_summary_table = pd.DataFrame()
+        st.session_state.last_ml_summary = {}
+        st.session_state.last_ml_artifacts = {}
+        st.session_state.history_notice = ("success", t["import_success"])
+        st.rerun()
+

@@ -1,7 +1,6 @@
 [theme]
-primaryColor = "#2ECC71" # Ein modernes Tech-Grün
+primaryColor = "#2ECC71" # CNN/LSTM-Test-Beta: klares Tech-Grün
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F2F6"
 textColor = "#31333F"
-# Streamlit checkt automatisch, ob dein Windows auf Dark- oder Lightmode steht 
-# und passt die Hintergrundfarben entsprechend an!
+# Streamlit nutzt diese Basisfarben; lokale Systemeinstellungen können die Darstellung zusätzlich beeinflussen.
