@@ -34,31 +34,37 @@ python -m streamlit run app.py
 
 ## CNN/LSTM Test Beta
 
-Der neue Tab `ML Forecast (Beta)` setzt auf einen Pastas + ML Hybrid:
+Der neue Tab `ML Forecast (Beta)` vergleicht einen Pastas + ML Hybrid mit direkten Nur-ML-Modellen:
 
 1. Pastas berechnet das interpretierbare Grundmodell ohne FlexModel.
 2. Die App berechnet das Residuum: `Beobachtung - Pastas-Simulation`.
 3. Ein neuronales Modell lernt dieses Residuum nur aus Wetterfeatures.
 4. Die Hybrid-Ausgabe wird als `Pastas + ML-Residuum` dargestellt.
+5. Zusätzlich trainiert die App `Nur CNN` und `Nur LSTM`, die den Grundwasserstand direkt aus denselben Wetterfeatures vorhersagen.
 
 Aktuell enthalten:
 
-- paralleles Training von `CNN` und `LSTM` als zwei unabhängige Vergleichsmodelle
-- Trainingsfenster: 1, 3, 5, 10, 15 oder 20 Jahre
-- Vorhersagehorizont: 1, 7, 30, 90, 180 Tage sowie 1, 2, 5 oder 10 Jahre
+- paralleles Training von `CNN` und `LSTM` als unabhängige Vergleichsmodelle
+- pro Architektur zwei Zielmodi: `Pastas + ML` und `Nur ML`
+- Trainingsfenster: 1, 3, 5, 10, 15, 20 oder 30 Jahre
+- Vorhersagehorizont: 1, 7, 30, 90, 180 Tage sowie 1, 2, 5, 10 oder 20 Jahre
+- Trainings-Epochen: frei wählbar bis maximal 1000
+- datenbasiertes Epochen-Limit und Startempfehlungen für Epochen, Lernrate und Hidden Size/Filter
 - Feature-Auswahl nur für Niederschlag/Verdunstung und rollierende Wetterfenster
 - keine vorherigen Grundwasserstände als Features
 - keine Jahreszeit-Features (`Sin/Cos`)
 - fester zeitbasierter Split: erste 60 % Training, nächste 20 % Test, letzte 20 % Validierung
 - Vergleichstabelle mit `R²`, `RMSE` und `EVP` getrennt für Test und Validierung
-- Plot `Beobachtet vs. Pastas vs. Hybrid`
+- Plot `Beobachtet vs. Pastas vs. ausgewählte ML-Variante`
 - ML-Impulsantwort für ein einmaliges stärkeres Niederschlagsereignis mit Verdunstung auf 0
 - Vergleich der ML-Reaktion mit der Pastas-Impulse-Response-Function ohne FlexModel
 - CSV-Export der Test-/Validierungsdaten und der Impulsantwort
-- `.gwml`-Export mit Manifest, Test-/Validierung, optionalem Hybrid-Forecast, Impulsantwort und trainiertem Modellzustand
+- `.gwml`-Export mit Manifest, Test-/Validierung, optionalem ML-Forecast, Impulsantwort und trainiertem Modellzustand
 - Übernahme des ML-Ergebnisses in die normale Laufhistorie
 
-Für einen echten Zukunfts-Hybrid zuerst im normalen `Forecast`-Tab ein Pastas-Szenario für dieselbe Messstelle berechnen. Danach ergänzt der ML-Tab diesen Forecast um das gelernte Residuum und exportiert die Hybrid-Prognose separat.
+Für einen echten Zukunftsforecast zuerst im normalen `Forecast`-Tab ein Pastas-Szenario für dieselbe Messstelle berechnen. Danach ergänzt der ML-Tab diesen Forecast entweder um das gelernte Residuum oder zeigt die direkte Nur-ML-Prognose.
+
+Ausführliche Begriffserklärungen und Bedienhinweise stehen in [ML_BEGRIFFE_IN_DEPTH.md](ML_BEGRIFFE_IN_DEPTH.md).
 
 ## Feature-Dokumentation
 

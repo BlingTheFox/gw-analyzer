@@ -59,18 +59,23 @@ def train_evaluate_hybrid(
     epochs: int = 60,
     learning_rate: float = 0.001,
     hidden_size: int = 32,
+    target_mode: str = "hybrid",
 ):
+    target_mode = str(target_mode or "hybrid").lower()
+    if target_mode not in {"hybrid", "direct"}:
+        raise ValueError(f"Unsupported ML target mode: {target_mode}")
+    target_column = "target_residual" if target_mode == "hybrid" else "observed"
     x_values, y_values, target_dates = make_supervised_sequences(
         frame,
         feature_columns,
-        "target_residual",
+        target_column,
         window_size,
         horizon,
     )
     if not feature_columns:
         raise ValueError("Bitte mindestens ein Feature für das ML-Training aktivieren.")
     if len(x_values) < 30:
-        available_targets = int(np.isfinite(frame["target_residual"].astype(float).to_numpy()).sum())
+        available_targets = int(np.isfinite(frame[target_column].astype(float).to_numpy()).sum())
         raise ValueError(
             "Nicht genug nutzbare Sequenzen für 60/20/20-Training, Test und Validierung. "
             f"Diese Kombination braucht mindestens {window_size + horizon} Kalendertage "
@@ -109,21 +114,28 @@ def train_evaluate_hybrid(
 
     def evaluate_split(x_split, y_split, date_split, label):
         x_split_scaled = x_scaler.transform(x_split.reshape(-1, x_split.shape[-1])).reshape(x_split.shape)
-        residual_prediction_scaled = predict_model(model, x_split_scaled)
-        residual_prediction = y_scaler.inverse_transform(
-            residual_prediction_scaled.reshape(-1, 1)
+        target_prediction_scaled = predict_model(model, x_split_scaled)
+        target_prediction = y_scaler.inverse_transform(
+            target_prediction_scaled.reshape(-1, 1)
         ).ravel()
         split_df = frame.loc[date_split, ["observed", "pastas_sim"]].copy()
         split_df["split"] = label
-        split_df["ml_residual_pred"] = residual_prediction
-        split_df["observed_residual"] = y_split
-        if split_df["pastas_sim"].notna().any():
-            split_df["hybrid_prediction"] = split_df["pastas_sim"] + split_df["ml_residual_pred"]
-            predicted = split_df["hybrid_prediction"].values
+        split_df["target_mode"] = target_mode
+        split_df["ml_prediction"] = target_prediction
+        split_df["target_value"] = y_split
+        if target_mode == "hybrid":
+            split_df["ml_residual_pred"] = target_prediction
+            split_df["ml_direct_pred"] = np.nan
+            if split_df["pastas_sim"].notna().any():
+                split_df["final_prediction"] = split_df["pastas_sim"] + split_df["ml_residual_pred"]
+            else:
+                split_df["final_prediction"] = split_df["ml_residual_pred"]
         else:
-            split_df["hybrid_prediction"] = split_df["ml_residual_pred"]
-            predicted = split_df["hybrid_prediction"].values
-        metrics = metric_summary(split_df["observed"].values, predicted)
+            split_df["ml_direct_pred"] = target_prediction
+            split_df["ml_residual_pred"] = split_df["ml_direct_pred"] - split_df["pastas_sim"]
+            split_df["final_prediction"] = split_df["ml_direct_pred"]
+        split_df["hybrid_prediction"] = split_df["final_prediction"]
+        metrics = metric_summary(split_df["observed"].values, split_df["final_prediction"].values)
         return split_df.reset_index().rename(columns={"index": "date"}), metrics
 
     test_df, test_metrics = evaluate_split(x_test, y_test, test_dates, "test")
@@ -144,6 +156,8 @@ def train_evaluate_hybrid(
         "n_test": int(len(x_test)),
         "n_valid": int(len(x_valid)),
         "feature_columns": feature_columns,
+        "target_mode": target_mode,
+        "target_column": target_column,
         "split": {"train": 0.6, "test": 0.2, "validation": 0.2},
     }
 
@@ -154,6 +168,7 @@ def build_artifacts(
     window_size: int,
     horizon: int,
     hidden_size: int,
+    target_mode: str = "hybrid",
 ) -> dict:
     return {
         "model": result["model"],
@@ -161,13 +176,14 @@ def build_artifacts(
         "y_scaler": result["y_scaler"],
         "feature_columns": list(result["feature_columns"]),
         "model_type": model_type,
+        "target_mode": result.get("target_mode", target_mode),
         "window_size": int(window_size),
         "horizon": int(horizon),
         "hidden_size": int(hidden_size),
     }
 
 
-def predict_hybrid_residuals(frame: pd.DataFrame, artifacts: dict) -> pd.DataFrame:
+def predict_ml_values(frame: pd.DataFrame, artifacts: dict) -> pd.DataFrame:
     feature_columns = list(artifacts.get("feature_columns", []))
     if not feature_columns:
         return pd.DataFrame()
@@ -184,9 +200,24 @@ def predict_hybrid_residuals(frame: pd.DataFrame, artifacts: dict) -> pd.DataFra
     x_scaler = artifacts["x_scaler"]
     y_scaler = artifacts["y_scaler"]
     x_scaled = x_scaler.transform(x_values.reshape(-1, x_values.shape[-1])).reshape(x_values.shape)
-    residual_scaled = predict_model(artifacts["model"], x_scaled)
-    residual = y_scaler.inverse_transform(residual_scaled.reshape(-1, 1)).ravel()
-    return pd.DataFrame({"date": dates, "ml_residual_pred": residual})
+    prediction_scaled = predict_model(artifacts["model"], x_scaled)
+    prediction = y_scaler.inverse_transform(prediction_scaled.reshape(-1, 1)).ravel()
+    target_mode = str(artifacts.get("target_mode", "hybrid") or "hybrid").lower()
+    result = pd.DataFrame({"date": dates, "ml_prediction": prediction, "target_mode": target_mode})
+    if target_mode == "hybrid":
+        result["ml_residual_pred"] = prediction
+    else:
+        result["ml_direct_pred"] = prediction
+    return result
+
+
+def predict_hybrid_residuals(frame: pd.DataFrame, artifacts: dict) -> pd.DataFrame:
+    prediction = predict_ml_values(frame, artifacts)
+    if prediction.empty:
+        return prediction
+    if "ml_residual_pred" not in prediction.columns:
+        prediction["ml_residual_pred"] = prediction.get("ml_prediction", np.nan)
+    return prediction
 
 
 def predict_impulse_response(

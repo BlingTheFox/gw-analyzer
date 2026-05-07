@@ -20,6 +20,8 @@ def ml_results_to_csv_bytes(df: pd.DataFrame) -> bytes:
 def _serialize_artifact(artifact: dict) -> dict:
     return {
         "model_type": artifact.get("model_type"),
+        "target_mode": artifact.get("target_mode", "hybrid"),
+        "display_name": artifact.get("display_name"),
         "station": artifact.get("station"),
         "window_size": artifact.get("window_size"),
         "horizon": artifact.get("horizon"),
@@ -88,6 +90,8 @@ def _deserialize_artifact(payload: dict) -> dict:
         ),
         "feature_columns": feature_columns,
         "model_type": payload.get("model_type"),
+        "target_mode": payload.get("target_mode", "hybrid"),
+        "display_name": payload.get("display_name"),
         "station": payload.get("station"),
         "window_size": int(payload.get("window_size", 30)),
         "horizon": int(payload.get("horizon", 1)),

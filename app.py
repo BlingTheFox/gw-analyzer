@@ -28,7 +28,7 @@ from ml_export import (
     ml_results_to_csv_bytes,
     save_ml_artifacts_bytes,
 )
-from ml_features import build_hybrid_feature_frame, build_hybrid_forecast_feature_frame
+from ml_features import build_hybrid_feature_frame, build_hybrid_forecast_feature_frame, make_supervised_sequences
 from ml_models import torch_available
 from ml_training import (
     build_artifacts,
@@ -52,8 +52,9 @@ MAX_ZIP_ENTRY_BYTES = 50 * 1024 * 1024
 MAX_PLOT_POINTS = 2500
 MAX_PARALLEL_WORKERS = 4
 ML_MODEL_TYPES = ["CNN", "LSTM"]
-ML_WINDOW_OPTIONS = [365, 365 * 3, 365 * 5, 365 * 10, 365 * 15, 365 * 20]
-ML_HORIZON_OPTIONS = [1, 7, 30, 90, 180, 365, 365 * 2, 365 * 5, 365 * 10]
+ML_WINDOW_OPTIONS = [365, 365 * 3, 365 * 5, 365 * 10, 365 * 15, 365 * 20, 365 * 30]
+ML_HORIZON_OPTIONS = [1, 7, 30, 90, 180, 365, 365 * 2, 365 * 5, 365 * 10, 365 * 20]
+ML_MAX_EPOCHS = 1000
 PARAMETER_SEARCH_MAX_COMBINATIONS = 81
 SPREADSHEET_FORMULA_PREFIXES = ("=", "+", "-", "@")
 RESPONSE_MODEL_TYPES = ["Gamma", "Exponential", "Hantush"]
@@ -337,18 +338,24 @@ TEXT = {
         "ml_requires_no_flex": "Für den Vergleich wird ein erfolgreiches PASTAS-Modell ohne FlexModel benötigt.",
         "ml_torch_missing": "PyTorch ist nicht installiert. Bitte `pip install -r requirements.txt` in dieser CNN/LSTM-Test-Beta ausführen.",
         "ml_model_type": "Neural-Modell",
-        "ml_model_parallel": "CNN und LSTM werden unabhängig parallel trainiert.",
+        "ml_model_parallel": "CNN und LSTM werden unabhängig parallel trainiert, jeweils als Pastas+ML und als Nur-ML.",
         "ml_model_detail": "Detailmodell",
         "ml_window": "Trainingsfenster",
-        "ml_window_help": "Länge der täglichen Sequenz, die das neuronale Modell als Wetterhistorie sieht. Lange Fenster wie 10, 15 oder 20 Jahre brauchen entsprechend lange Zeitreihen.",
+        "ml_window_help": "Länge der täglichen Sequenz, die das neuronale Modell als Wetterhistorie sieht. Lange Fenster wie 10, 15, 20 oder 30 Jahre brauchen entsprechend lange Zeitreihen.",
         "ml_horizon": "Vorhersagehorizont",
         "ml_horizon_help": "Abstand zwischen Ende des Eingabefensters und Zielwert. Längere Horizonte sind schwerer und reduzieren die Zahl nutzbarer Trainingssequenzen.",
         "ml_epochs": "Trainings-Epochen",
-        "ml_epochs_help": "Wie oft das Modell den Trainingsblock durchläuft. Mehr Epochen können helfen, erhöhen aber Rechenzeit und Overfitting-Risiko.",
+        "ml_epochs_help": f"Wie oft das Modell den Trainingsblock durchläuft. Mehr Epochen können helfen, erhöhen aber Rechenzeit und Overfitting-Risiko. Maximum: {ML_MAX_EPOCHS}.",
         "ml_learning_rate": "Lernrate",
         "ml_learning_rate_help": "Schrittweite der Optimierung. Kleinere Werte trainieren ruhiger, größere Werte schneller, aber instabiler.",
         "ml_hidden_size": "Hidden Size / Filter",
         "ml_hidden_size_help": "Größe des LSTM-Speichers bzw. Anzahl der CNN-Filter. Größer ist flexibler, braucht aber mehr Daten.",
+        "ml_data_epoch_limit": "Datenbasiertes Epochen-Limit: {limit} (App-Maximum: {max_epochs}). Grundlage: {sequences} nutzbare Sequenzen, davon {train} Training.",
+        "ml_data_epoch_limit_empty": "Für diese Station/Fenster/Horizont-Kombination gibt es aktuell keine nutzbaren Trainingssequenzen.",
+        "ml_recommendation": "Empfehlung: {epochs} Epochen, Lernrate {learning_rate}, Hidden Size/Filter {hidden_size}. Grund: {reason}.",
+        "ml_recommendation_note": "Das ist eine datenbasierte Startempfehlung; die genaueste Variante ist danach die mit dem besten Validierungs-R² in der Tabelle.",
+        "ml_target_hybrid": "Pastas + ML",
+        "ml_target_direct": "Nur ML",
         "ml_split_note": "Fester zeitlicher Split: erste 60 % Training, nächste 20 % Test, letzte 20 % Validierung.",
         "ml_feature_restriction": "Vergleichssetup: keine vorherigen Grundwasserstände als Features und keine Jahreszeit-Sin/Cos-Features.",
         "ml_features": "Features",
@@ -356,10 +363,10 @@ TEXT = {
         "ml_feature_weather_help": "Tägliche Niederschlags- und Verdunstungswerte. Das ist der direkteste Vergleich zu den PASTAS-Wetterinputs.",
         "ml_feature_rollings": "rollierende Wetterfenster",
         "ml_feature_rollings_help": "Summen/Mittelwerte über 7, 30 und 90 Tage. Das gibt CNN/LSTM gröbere Feuchte- und Trockenheitsinformationen, ohne Grundwasserstände zu verwenden.",
-        "ml_train": "CNN und LSTM trainieren",
+        "ml_train": "CNN/LSTM trainieren (Hybrid und Nur-ML)",
         "ml_test": "Test",
         "ml_validation": "Validierung",
-        "ml_results_table": "CNN/LSTM-Vergleich",
+        "ml_results_table": "CNN/LSTM- und Zielmodus-Vergleich",
         "ml_add_history": "ML-Ergebnis in Historie übernehmen",
         "ml_added_history": "ML-Ergebnis wurde in die Historie übernommen.",
         "ml_download_validation": "Validierungsdaten exportieren",
@@ -373,10 +380,10 @@ TEXT = {
         "ml_impulse_run": "Impulsantwort berechnen",
         "ml_download_impulse": "Impulsantwort als CSV exportieren",
         "ml_impulse_no_rows": "Für diese Fenster-/Horizont-Kombination konnte keine Impulsantwort berechnet werden.",
-        "ml_future_heading": "Hybrid-Forecast",
-        "ml_future_needs_forecast": "Berechne im Forecast-Tab zuerst ein Pastas-Szenario für dieselbe Station. Danach ergänzt der ML-Tab den Forecast um das gelernte Residuum.",
+        "ml_future_heading": "ML-Forecast",
+        "ml_future_needs_forecast": "Berechne im Forecast-Tab zuerst ein Pastas-Szenario für dieselbe Station. Danach kann der ML-Tab entweder das gelernte Residuum ergänzen oder eine Nur-ML-Vorhersage anzeigen.",
         "ml_future_no_rows": "Für das gewählte Trainingsfenster und den Horizont gibt es noch keine vorhersagbaren Zukunftszeilen.",
-        "ml_download_future": "Hybrid-Forecast als CSV exportieren",
+        "ml_download_future": "ML-Forecast als CSV exportieren",
     },
     "English": {
         "title": "Groundwater Analysis Tool - CNN/LSTM Test Beta",
@@ -647,18 +654,24 @@ TEXT = {
         "ml_requires_no_flex": "The comparison requires a successful PASTAS model without FlexModel.",
         "ml_torch_missing": "PyTorch is not installed. Please run `pip install -r requirements.txt` in this CNN/LSTM test beta.",
         "ml_model_type": "Neural model",
-        "ml_model_parallel": "CNN and LSTM are trained independently in parallel.",
+        "ml_model_parallel": "CNN and LSTM are trained independently in parallel, each as Pastas+ML and only-ML.",
         "ml_model_detail": "Detail model",
         "ml_window": "Training window",
-        "ml_window_help": "Length of the daily input sequence seen by the neural model. Long windows such as 10, 15 or 20 years require sufficiently long time series.",
+        "ml_window_help": "Length of the daily input sequence seen by the neural model. Long windows such as 10, 15, 20 or 30 years require sufficiently long time series.",
         "ml_horizon": "Forecast horizon",
         "ml_horizon_help": "Lead time between the end of the input window and the target value. Longer horizons are harder and reduce the number of usable training sequences.",
         "ml_epochs": "Training epochs",
-        "ml_epochs_help": "Number of passes over the training block. More epochs may help but increase runtime and overfitting risk.",
+        "ml_epochs_help": f"Number of passes over the training block. More epochs may help but increase runtime and overfitting risk. Maximum: {ML_MAX_EPOCHS}.",
         "ml_learning_rate": "Learning rate",
         "ml_learning_rate_help": "Optimizer step size. Smaller values train more calmly, larger values faster but less stably.",
         "ml_hidden_size": "Hidden size / filters",
         "ml_hidden_size_help": "LSTM memory size or CNN filter count. Larger is more flexible but needs more data.",
+        "ml_data_epoch_limit": "Data-based epoch limit: {limit} (app maximum: {max_epochs}). Based on {sequences} usable sequences, {train} for training.",
+        "ml_data_epoch_limit_empty": "The current station/window/horizon combination does not yield usable training sequences.",
+        "ml_recommendation": "Recommendation: {epochs} epochs, learning rate {learning_rate}, hidden size/filters {hidden_size}. Reason: {reason}.",
+        "ml_recommendation_note": "This is a data-based starting point; the most accurate variant is the one with the best validation R² in the table afterwards.",
+        "ml_target_hybrid": "Pastas + ML",
+        "ml_target_direct": "Only ML",
         "ml_split_note": "Fixed temporal split: first 60% training, next 20% test, final 20% validation.",
         "ml_feature_restriction": "Comparison setup: no previous groundwater heads as features and no seasonal sin/cos features.",
         "ml_features": "Features",
@@ -666,10 +679,10 @@ TEXT = {
         "ml_feature_weather_help": "Daily rainfall and evaporation values. This is the most direct comparison to the PASTAS weather inputs.",
         "ml_feature_rollings": "Rolling weather windows",
         "ml_feature_rollings_help": "7, 30 and 90 day sums/means. This gives CNN/LSTM coarse wetness and dryness information without groundwater heads.",
-        "ml_train": "Train CNN and LSTM",
+        "ml_train": "Train CNN/LSTM (hybrid and only ML)",
         "ml_test": "Test",
         "ml_validation": "Validation",
-        "ml_results_table": "CNN/LSTM comparison",
+        "ml_results_table": "CNN/LSTM and target-mode comparison",
         "ml_add_history": "Add ML result to history",
         "ml_added_history": "ML result was added to history.",
         "ml_download_validation": "Export validation data",
@@ -683,10 +696,10 @@ TEXT = {
         "ml_impulse_run": "Compute impulse response",
         "ml_download_impulse": "Export impulse response as CSV",
         "ml_impulse_no_rows": "No impulse response could be computed for this window/horizon setup.",
-        "ml_future_heading": "Hybrid forecast",
-        "ml_future_needs_forecast": "Compute a Pastas scenario for the same station in the Forecast tab first. The ML tab can then add the learned residual to that forecast.",
+        "ml_future_heading": "ML forecast",
+        "ml_future_needs_forecast": "Compute a Pastas scenario for the same station in the Forecast tab first. The ML tab can then add the learned residual or show a pure ML forecast.",
         "ml_future_no_rows": "The selected training window and horizon do not yield predictable future rows yet.",
-        "ml_download_future": "Export hybrid forecast as CSV",
+        "ml_download_future": "Export ML forecast as CSV",
     },
 }
 
@@ -2053,6 +2066,115 @@ def format_duration_days(days, language="Deutsch"):
     return f"{days} days" if language == "English" else f"{days} Tage"
 
 
+def format_ml_run_label(model_type, target_mode, language="Deutsch"):
+    model_type = str(model_type).upper()
+    target_mode = str(target_mode or "hybrid").lower()
+    if target_mode == "direct":
+        return f"Only {model_type}" if language == "English" else f"Nur {model_type}"
+    return f"Pastas + {model_type}"
+
+
+def compute_ml_sequence_stats(frame, feature_columns, window_size, horizon, target_column="target_residual"):
+    if frame is None or frame.empty or not feature_columns or target_column not in frame.columns:
+        return {
+            "available_targets": 0,
+            "sequences": 0,
+            "n_train": 0,
+            "n_test": 0,
+            "n_valid": 0,
+            "required_days": int(window_size) + int(horizon),
+            "first_target": None,
+            "last_target": None,
+        }
+    _, _, target_dates = make_supervised_sequences(
+        frame,
+        feature_columns,
+        target_column,
+        int(window_size),
+        int(horizon),
+    )
+    n_sequences = int(len(target_dates))
+    train_end = int(n_sequences * 0.6)
+    test_end = int(n_sequences * 0.8)
+    available_targets = int(np.isfinite(frame[target_column].astype(float).to_numpy()).sum())
+    return {
+        "available_targets": available_targets,
+        "sequences": n_sequences,
+        "n_train": train_end,
+        "n_test": max(0, test_end - train_end),
+        "n_valid": max(0, n_sequences - test_end),
+        "required_days": int(window_size) + int(horizon),
+        "first_target": target_dates.min() if n_sequences else None,
+        "last_target": target_dates.max() if n_sequences else None,
+    }
+
+
+def estimate_ml_epoch_limit(n_train, hard_limit=ML_MAX_EPOCHS):
+    n_train = int(n_train or 0)
+    if n_train < 5:
+        return 5
+    if n_train < 30:
+        return 30
+    if n_train < 80:
+        return 80
+    if n_train < 180:
+        return 150
+    if n_train < 450:
+        return 250
+    if n_train < 900:
+        return 400
+    if n_train < 1600:
+        return 650
+    return int(hard_limit)
+
+
+def recommend_ml_hyperparameters(stats, window_size, horizon, n_features, hard_epoch_limit=ML_MAX_EPOCHS):
+    n_train = int(stats.get("n_train", 0) or 0)
+    window_years = float(window_size) / 365.0
+    horizon_years = float(horizon) / 365.0
+    epoch_limit = estimate_ml_epoch_limit(n_train, hard_epoch_limit)
+
+    if n_train < 80:
+        epochs = min(epoch_limit, 60)
+        learning_rate = 0.0005
+        hidden_size = 16
+        reason = "wenige Trainingssequenzen"
+    elif n_train < 250:
+        epochs = min(epoch_limit, 100)
+        learning_rate = 0.0005 if horizon_years >= 5 else 0.001
+        hidden_size = 16 if n_features <= 2 else 32
+        reason = "kleiner bis mittlerer Trainingsblock"
+    elif n_train < 700:
+        epochs = min(epoch_limit, 160)
+        learning_rate = 0.001
+        hidden_size = 32 if horizon_years >= 5 else 64
+        reason = "mittlerer Trainingsblock"
+    elif n_train < 1400:
+        epochs = min(epoch_limit, 240)
+        learning_rate = 0.001
+        hidden_size = 64
+        reason = "größerer Trainingsblock"
+    else:
+        epochs = min(epoch_limit, 320)
+        learning_rate = 0.001 if horizon_years >= 2 else 0.002
+        hidden_size = 128 if n_features >= 4 and window_years <= 10 else 64
+        reason = "viele Trainingssequenzen"
+
+    if window_years >= 20 or horizon_years >= 10:
+        learning_rate = min(learning_rate, 0.001)
+        hidden_size = min(hidden_size, 64)
+        epochs = min(epoch_limit, max(epochs, 120))
+        reason += ", sehr langes Fenster/Horizont"
+
+    return {
+        "epochs": int(max(5, min(epoch_limit, epochs))),
+        "learning_rate": float(learning_rate),
+        "hidden_size": int(hidden_size),
+        "epoch_limit": int(epoch_limit),
+        "reason": reason,
+    }
+
+
 def data_gap_days(last_date):
     if last_date is None or pd.isna(last_date):
         return None
@@ -2467,7 +2589,7 @@ def normalize_ml_artifacts(artifacts):
     if not isinstance(artifacts, dict) or not artifacts:
         return {}
     if "model" in artifacts:
-        return {str(artifacts.get("model_type") or "ML"): artifacts}
+        return {str(artifacts.get("display_name") or artifacts.get("model_type") or "ML"): artifacts}
     return {
         str(name): artifact
         for name, artifact in artifacts.items()
@@ -4817,8 +4939,8 @@ if active_main_view == "ml_forecast":
 
             if ml_model is not None:
                 st.caption(t["ml_model_parallel"])
-                ml_control_cols = st.columns(4)
-                with ml_control_cols[0]:
+                ml_window_cols = st.columns(2)
+                with ml_window_cols[0]:
                     ml_window = st.selectbox(
                         t["ml_window"],
                         ML_WINDOW_OPTIONS,
@@ -4827,7 +4949,7 @@ if active_main_view == "ml_forecast":
                         format_func=lambda days: format_duration_days(days, st.session_state.lang),
                         help=t["ml_window_help"],
                     )
-                with ml_control_cols[1]:
+                with ml_window_cols[1]:
                     ml_horizon = st.selectbox(
                         t["ml_horizon"],
                         ML_HORIZON_OPTIONS,
@@ -4836,29 +4958,6 @@ if active_main_view == "ml_forecast":
                         format_func=lambda days: format_duration_days(days, st.session_state.lang),
                         help=t["ml_horizon_help"],
                     )
-                with ml_control_cols[2]:
-                    ml_epochs = st.number_input(
-                        t["ml_epochs"],
-                        min_value=5,
-                        max_value=500,
-                        value=60,
-                        step=5,
-                        help=t["ml_epochs_help"],
-                    )
-                with ml_control_cols[3]:
-                    ml_hidden_size = st.selectbox(
-                        t["ml_hidden_size"],
-                        [16, 32, 64, 128],
-                        index=1,
-                        help=t["ml_hidden_size_help"],
-                    )
-                ml_learning_rate = st.selectbox(
-                    t["ml_learning_rate"],
-                    [0.0005, 0.001, 0.002, 0.005],
-                    index=1,
-                    format_func=lambda value: f"{value:g}",
-                    help=t["ml_learning_rate_help"],
-                )
 
                 st.caption(t["ml_split_note"])
                 st.caption(t["ml_feature_restriction"])
@@ -4877,70 +4976,178 @@ if active_main_view == "ml_forecast":
                         help=t["ml_feature_rollings_help"],
                     )
 
+                feature_frame = build_hybrid_feature_frame(
+                    station=ml_station,
+                    gw_df=gw_df,
+                    rain=rain,
+                    evap=evap,
+                    pastas_model=ml_model,
+                    include_head=False,
+                    include_weather=ml_include_weather,
+                    include_rollings=ml_include_rollings,
+                    include_season=False,
+                )
+                feature_columns = [
+                    column
+                    for column in feature_frame.columns
+                    if column not in {"observed", "pastas_sim", "target_residual", "head_filled"}
+                ]
+                setup_stats = compute_ml_sequence_stats(
+                    feature_frame,
+                    feature_columns,
+                    ml_window,
+                    ml_horizon,
+                    target_column="target_residual",
+                )
+                recommendation = recommend_ml_hyperparameters(
+                    setup_stats,
+                    ml_window,
+                    ml_horizon,
+                    len(feature_columns),
+                    ML_MAX_EPOCHS,
+                )
+                epoch_widget_max = max(5, int(recommendation["epoch_limit"]))
+                current_ml_epochs = st.session_state.get("ml_epochs", 60) or 60
+                if int(current_ml_epochs) > epoch_widget_max:
+                    st.session_state.ml_epochs = epoch_widget_max
+
+                if setup_stats["sequences"]:
+                    st.caption(
+                        t["ml_data_epoch_limit"].format(
+                            limit=epoch_widget_max,
+                            max_epochs=ML_MAX_EPOCHS,
+                            sequences=setup_stats["sequences"],
+                            train=setup_stats["n_train"],
+                        )
+                    )
+                else:
+                    st.caption(t["ml_data_epoch_limit_empty"])
+                st.caption(
+                    t["ml_recommendation"].format(
+                        epochs=recommendation["epochs"],
+                        learning_rate=f"{recommendation['learning_rate']:g}",
+                        hidden_size=recommendation["hidden_size"],
+                        reason=recommendation["reason"],
+                    )
+                )
+                st.caption(t["ml_recommendation_note"])
+
+                ml_param_cols = st.columns(3)
+                with ml_param_cols[0]:
+                    ml_epochs = st.number_input(
+                        t["ml_epochs"],
+                        min_value=5,
+                        max_value=epoch_widget_max,
+                        value=min(60, epoch_widget_max),
+                        step=5,
+                        help=t["ml_epochs_help"],
+                        key="ml_epochs",
+                    )
+                with ml_param_cols[1]:
+                    ml_learning_rate_options = [0.0005, 0.001, 0.002, 0.005]
+                    recommended_lr_index = (
+                        ml_learning_rate_options.index(recommendation["learning_rate"])
+                        if recommendation["learning_rate"] in ml_learning_rate_options
+                        else 1
+                    )
+                    ml_learning_rate = st.selectbox(
+                        t["ml_learning_rate"],
+                        ml_learning_rate_options,
+                        index=recommended_lr_index,
+                        format_func=lambda value: f"{value:g}",
+                        help=t["ml_learning_rate_help"],
+                        key="ml_learning_rate",
+                    )
+                with ml_param_cols[2]:
+                    ml_hidden_size_options = [16, 32, 64, 128]
+                    recommended_hidden_index = (
+                        ml_hidden_size_options.index(recommendation["hidden_size"])
+                        if recommendation["hidden_size"] in ml_hidden_size_options
+                        else 1
+                    )
+                    ml_hidden_size = st.selectbox(
+                        t["ml_hidden_size"],
+                        ml_hidden_size_options,
+                        index=recommended_hidden_index,
+                        help=t["ml_hidden_size_help"],
+                        key="ml_hidden_size",
+                    )
+
                 if st.button(t["ml_train"], type="primary", key="train_ml_hybrid"):
                     try:
-                        feature_frame = build_hybrid_feature_frame(
-                            station=ml_station,
-                            gw_df=gw_df,
-                            rain=rain,
-                            evap=evap,
-                            pastas_model=ml_model,
-                            include_head=False,
-                            include_weather=ml_include_weather,
-                            include_rollings=ml_include_rollings,
-                            include_season=False,
-                        )
-                        feature_columns = [
-                            column
-                            for column in feature_frame.columns
-                            if column not in {"observed", "pastas_sim", "target_residual", "head_filled"}
-                        ]
                         training_results = {}
                         training_errors = {}
+                        ml_run_specs = [
+                            {
+                                "model_type": model_type,
+                                "target_mode": target_mode,
+                                "display_name": format_ml_run_label(
+                                    model_type,
+                                    target_mode,
+                                    st.session_state.lang,
+                                ),
+                            }
+                            for model_type in ML_MODEL_TYPES
+                            for target_mode in ("hybrid", "direct")
+                        ]
                         with st.spinner(t["computing"]):
-                            with ThreadPoolExecutor(max_workers=len(ML_MODEL_TYPES)) as executor:
+                            with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(ml_run_specs))) as executor:
                                 futures = {
                                     executor.submit(
                                         train_evaluate_hybrid,
                                         feature_frame,
                                         feature_columns,
-                                        model_type=model_type,
+                                        model_type=spec["model_type"],
                                         window_size=ml_window,
                                         horizon=ml_horizon,
                                         train_fraction=0.6,
                                         epochs=int(ml_epochs),
                                         learning_rate=float(ml_learning_rate),
                                         hidden_size=int(ml_hidden_size),
-                                    ): model_type
-                                    for model_type in ML_MODEL_TYPES
+                                        target_mode=spec["target_mode"],
+                                    ): spec
+                                    for spec in ml_run_specs
                                 }
                                 for future in as_completed(futures):
-                                    model_type = futures[future]
+                                    spec = futures[future]
+                                    display_name = spec["display_name"]
                                     try:
-                                        training_results[model_type] = future.result()
+                                        training_results[display_name] = {
+                                            "result": future.result(),
+                                            "spec": spec,
+                                        }
                                     except Exception as exc:
-                                        training_errors[model_type] = str(exc)
+                                        training_errors[display_name] = str(exc)
 
                         for model_type, error_message in training_errors.items():
                             st.warning(f"{model_type}: {error_message}")
                         if not training_results:
-                            raise RuntimeError("CNN und LSTM konnten nicht trainiert werden.")
+                            raise RuntimeError("CNN/LSTM konnten in keinem Zielmodus trainiert werden.")
 
                         evaluation_frames = []
                         summary_rows = []
                         artifact_store = {}
-                        for model_type in ML_MODEL_TYPES:
-                            if model_type not in training_results:
+                        for spec in ml_run_specs:
+                            display_name = spec["display_name"]
+                            if display_name not in training_results:
                                 continue
-                            result = training_results[model_type]
+                            result = training_results[display_name]["result"]
                             evaluation_df = result["evaluation"].copy()
-                            evaluation_df["NeuralModel"] = model_type
+                            evaluation_df["NeuralModel"] = display_name
+                            evaluation_df["Architektur"] = spec["model_type"]
+                            evaluation_df["MLModus"] = (
+                                t["ml_target_direct"] if spec["target_mode"] == "direct" else t["ml_target_hybrid"]
+                            )
                             evaluation_frames.append(evaluation_df)
                             test_metrics = result["test_metrics"]
                             validation_metrics = result["validation_metrics"]
                             summary_rows.append(
                                 {
-                                    "NeuralModel": model_type,
+                                    "NeuralModel": display_name,
+                                    "Architektur": spec["model_type"],
+                                    "MLModus": (
+                                        t["ml_target_direct"] if spec["target_mode"] == "direct" else t["ml_target_hybrid"]
+                                    ),
                                     "R² Test": test_metrics["R2"],
                                     "RMSE Test": test_metrics["RMSE"],
                                     "EVP Test": test_metrics["EVP"],
@@ -4950,17 +5157,22 @@ if active_main_view == "ml_forecast":
                                     "Train": result["n_train"],
                                     "Test": result["n_test"],
                                     "Validierung": result["n_valid"],
+                                    "Epochen": int(ml_epochs),
+                                    "Lernrate": float(ml_learning_rate),
+                                    "Hidden Size/Filter": int(ml_hidden_size),
                                 }
                             )
                             artifact = build_artifacts(
                                 result,
-                                model_type,
+                                spec["model_type"],
                                 ml_window,
                                 ml_horizon,
                                 ml_hidden_size,
+                                target_mode=spec["target_mode"],
                             )
                             artifact["station"] = ml_station
-                            artifact_store[model_type] = artifact
+                            artifact["display_name"] = display_name
+                            artifact_store[display_name] = artifact
 
                         validation_df = pd.concat(evaluation_frames, ignore_index=True)
                         summary_table = pd.DataFrame(summary_rows)
@@ -4975,12 +5187,21 @@ if active_main_view == "ml_forecast":
                         st.session_state.last_ml_summary = {
                             "Run": run_label,
                             "Messstelle": ml_station,
-                            "Modell": "Pastas ohne Flex + CNN/LSTM parallel",
+                            "Modell": "Pastas + ML und Nur-ML parallel",
                             "BestesNeuralModell": selected_summary_row["NeuralModel"],
+                            "Architektur": selected_summary_row.get("Architektur"),
+                            "MLModus": selected_summary_row.get("MLModus"),
                             "Fenster": int(ml_window),
                             "Horizont": int(ml_horizon),
                             "Split": "60/20/20",
                             "Features": ", ".join(feature_columns),
+                            "Epochen": int(ml_epochs),
+                            "Lernrate": float(ml_learning_rate),
+                            "HiddenSize": int(ml_hidden_size),
+                            "Empfohlene_Epochen": recommendation["epochs"],
+                            "Empfohlene_Lernrate": recommendation["learning_rate"],
+                            "Empfohlene_HiddenSize": recommendation["hidden_size"],
+                            "Datenbasiertes_Epochenlimit": epoch_widget_max,
                             "R2": selected_summary_row["R² Validierung"],
                             "RMSE": selected_summary_row["RMSE Validierung"],
                             "EVP": selected_summary_row["EVP Validierung"],
@@ -5053,9 +5274,9 @@ if active_main_view == "ml_forecast":
                         metric_cols[4].metric(f"RMSE {t['ml_validation']}", f"{float(selected_summary_row.get('RMSE Validierung', float('nan'))):.3f}")
                         metric_cols[5].metric(f"EVP {t['ml_validation']}", f"{float(selected_summary_row.get('EVP Validierung', float('nan'))):.1f}")
                     count_cols = st.columns(3)
-                    count_cols[0].metric("Train", int(ml_summary.get("n_train", 0)))
-                    count_cols[1].metric(t["ml_test"], int(ml_summary.get("n_test", 0)))
-                    count_cols[2].metric(t["ml_validation"], int(ml_summary.get("n_valid", 0)))
+                    count_cols[0].metric("Train", int(selected_summary_row.get("Train", ml_summary.get("n_train", 0))))
+                    count_cols[1].metric(t["ml_test"], int(selected_summary_row.get("Test", ml_summary.get("n_test", 0))))
+                    count_cols[2].metric(t["ml_validation"], int(selected_summary_row.get("Validierung", ml_summary.get("n_valid", 0))))
 
                     plot_df = ml_validation_df.copy()
                     if "NeuralModel" in plot_df.columns:
@@ -5065,10 +5286,11 @@ if active_main_view == "ml_forecast":
                     axis.plot(plot_df["date"], plot_df["observed"], label=t["observed"], linewidth=1.2)
                     if "pastas_sim" in plot_df.columns:
                         axis.plot(plot_df["date"], plot_df["pastas_sim"], label="Pastas ohne Flex", linewidth=1.0)
+                    prediction_column = "final_prediction" if "final_prediction" in plot_df.columns else "hybrid_prediction"
                     axis.plot(
                         plot_df["date"],
-                        plot_df["hybrid_prediction"],
-                        label=f"Pastas + {selected_ml_model}",
+                        plot_df[prediction_column],
+                        label=selected_ml_model,
                         linewidth=1.1,
                     )
                     if "split" in plot_df.columns:
@@ -5125,8 +5347,15 @@ if active_main_view == "ml_forecast":
                         if impulse_df.empty:
                             st.info(t["ml_impulse_no_rows"])
                         else:
-                            pastas_irf = create_pastas_impulse_response_df(ml_model, impulse_mm)
-                            if pastas_irf.empty:
+                            target_mode = str(ml_artifacts.get("target_mode", "hybrid") or "hybrid").lower()
+                            pastas_irf = (
+                                create_pastas_impulse_response_df(ml_model, impulse_mm)
+                                if target_mode == "hybrid"
+                                else pd.DataFrame()
+                            )
+                            if target_mode != "hybrid":
+                                impulse_df["pastas_irf_response"] = 0.0
+                            elif pastas_irf.empty:
                                 impulse_df["pastas_irf_response"] = np.nan
                             else:
                                 impulse_df["pastas_irf_response"] = np.interp(
@@ -5141,7 +5370,8 @@ if active_main_view == "ml_forecast":
                                 + impulse_df["ml_residual_response"]
                             )
                             impulse_df["station"] = summary_station
-                            impulse_df["model"] = f"Pastas ohne Flex + {selected_ml_model}"
+                            impulse_df["model"] = selected_ml_model
+                            impulse_df["target_mode"] = target_mode
                             impulse_df["evap"] = 0.0
                             st.session_state.last_ml_impulse_df = impulse_df
                             st.rerun()
@@ -5153,26 +5383,30 @@ if active_main_view == "ml_forecast":
                         ]
                     if not ml_impulse_df.empty and "model" in ml_impulse_df.columns:
                         ml_impulse_df = ml_impulse_df[
-                            ml_impulse_df["model"].astype(str) == f"Pastas ohne Flex + {selected_ml_model}"
+                            ml_impulse_df["model"].astype(str) == str(selected_ml_model)
                         ]
                     if not ml_impulse_df.empty:
                         figure, axis = plt.subplots(figsize=(12, 5))
-                        axis.plot(
-                            ml_impulse_df["lag_days"],
-                            ml_impulse_df["pastas_irf_response"],
-                            label="Pastas IRF ohne Flex",
-                            linewidth=1.2,
-                        )
+                        if (
+                            "target_mode" not in ml_impulse_df.columns
+                            or (ml_impulse_df["target_mode"].astype(str) == "hybrid").any()
+                        ):
+                            axis.plot(
+                                ml_impulse_df["lag_days"],
+                                ml_impulse_df["pastas_irf_response"],
+                                label="Pastas IRF ohne Flex",
+                                linewidth=1.2,
+                            )
                         axis.plot(
                             ml_impulse_df["lag_days"],
                             ml_impulse_df["ml_residual_response"],
-                            label="ML-Residuum",
+                            label="ML-Residuum" if str(ml_artifacts.get("target_mode", "hybrid")) == "hybrid" else "ML-Antwort",
                             linewidth=1.1,
                         )
                         axis.plot(
                             ml_impulse_df["lag_days"],
                             ml_impulse_df["hybrid_response"],
-                            label=f"Pastas + {selected_ml_model}",
+                            label=selected_ml_model,
                             linewidth=1.1,
                         )
                         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.7)
@@ -5222,21 +5456,36 @@ if active_main_view == "ml_forecast":
                                     on="date",
                                     how="left",
                                 )
-                                ml_future_df["hybrid_prediction"] = (
-                                    ml_future_df["simulated_head"] + ml_future_df["ml_residual_pred"]
-                                )
+                                target_mode = str(ml_artifacts.get("target_mode", "hybrid") or "hybrid").lower()
+                                if target_mode == "hybrid":
+                                    ml_future_df["final_prediction"] = (
+                                        ml_future_df["simulated_head"] + ml_future_df["ml_residual_pred"]
+                                    )
+                                else:
+                                    direct_column = (
+                                        "ml_direct_pred"
+                                        if "ml_direct_pred" in ml_future_df.columns
+                                        else "ml_prediction"
+                                    )
+                                    ml_future_df["final_prediction"] = ml_future_df[direct_column]
+                                ml_future_df["hybrid_prediction"] = ml_future_df["final_prediction"]
                                 if "is_forecast" in ml_future_df.columns:
                                     ml_future_df = ml_future_df[
                                         ml_future_df["is_forecast"].apply(coerce_bool)
                                     ]
-                                ml_future_df = ml_future_df.dropna(subset=["hybrid_prediction"])
+                                ml_future_df = ml_future_df.dropna(subset=["final_prediction"])
                                 ml_future_df["NeuralModel"] = selected_ml_model
+                                ml_future_df["MLModus"] = (
+                                    t["ml_target_direct"] if target_mode == "direct" else t["ml_target_hybrid"]
+                                )
                                 st.session_state.last_ml_forecast_df = ml_future_df
 
                     if not ml_future_df.empty:
                         st.markdown(f"### {t['ml_future_heading']}")
                         future_plot_df = ml_future_df.copy()
                         future_plot_df["date"] = pd.to_datetime(future_plot_df["date"], errors="coerce")
+                        if "final_prediction" not in future_plot_df.columns and "hybrid_prediction" in future_plot_df.columns:
+                            future_plot_df["final_prediction"] = future_plot_df["hybrid_prediction"]
                         figure, axis = plt.subplots(figsize=(12, 5))
                         axis.plot(
                             future_plot_df["date"],
@@ -5246,8 +5495,8 @@ if active_main_view == "ml_forecast":
                         )
                         axis.plot(
                             future_plot_df["date"],
-                            future_plot_df["hybrid_prediction"],
-                            label=f"Pastas + {selected_ml_model}",
+                            future_plot_df["final_prediction"],
+                            label=selected_ml_model,
                             linewidth=1.1,
                         )
                         axis.set_title(f"{summary_station}: {t['ml_future_heading']}")
@@ -5261,7 +5510,7 @@ if active_main_view == "ml_forecast":
                         st.download_button(
                             t["ml_download_future"],
                             data=ml_results_to_csv_bytes(sanitize_export_df(future_plot_df)),
-                            file_name=f"{summary_station}_ml_hybrid_forecast.csv",
+                            file_name=f"{summary_station}_ml_forecast.csv",
                             mime="text/csv",
                         )
                     elif forecast_source_df.empty:
@@ -5293,13 +5542,13 @@ if active_main_view == "ml_forecast":
                         ml_history_row = {
                             "Run": ml_summary.get("Run"),
                             "Messstelle": ml_summary.get("Messstelle"),
-                            "Modus": "ML Hybrid",
-                            "Suchmodus": "Pastas ohne Flex + ML Residuen",
+                            "Modus": "ML",
+                            "Suchmodus": "Pastas + ML und Nur-ML",
                             "Konfiguration": (
-                                f"Pastas ohne Flex + {selected_ml_model} | "
+                                f"{selected_ml_model} | "
                                 f"{ml_summary.get('Fenster')}d -> {ml_summary.get('Horizont')}d"
                             ),
-                            "Modell": f"Pastas ohne Flex + {selected_ml_model}",
+                            "Modell": selected_ml_model,
                             "Flex": False,
                             "Noise": None if ml_summary_station_row is None else ml_summary_station_row.get("Noise"),
                             "Cutoff": None if ml_summary_station_row is None else ml_summary_station_row.get("Cutoff"),
