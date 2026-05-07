@@ -76,7 +76,10 @@ def build_hybrid_feature_frame(
         for column in frame.columns
         if column not in {"observed", "pastas_sim", "target_residual", "head_filled"}
     ]
-    frame = frame.dropna(subset=["observed", "target_residual", *feature_columns])
+    # Keep the daily weather history. Groundwater observations may be weekly or
+    # irregular, so targets are filtered later when supervised sequences are built.
+    if feature_columns:
+        frame = frame.dropna(subset=feature_columns)
     return frame
 
 
@@ -194,11 +197,17 @@ def make_supervised_sequences(
     x_values = []
     y_values = []
 
-    for start in range(0, len(frame) - window_size - horizon + 1):
+    target_indices = np.flatnonzero(np.isfinite(target))
+    for target_index in target_indices:
+        start = int(target_index) - window_size - horizon + 1
+        if start < 0:
+            continue
         end = start + window_size
-        target_index = end + horizon - 1
-        x_values.append(values[start:end])
-        y_values.append(target[target_index])
+        feature_window = values[start:end]
+        if len(feature_window) != window_size or not np.isfinite(feature_window).all():
+            continue
+        x_values.append(feature_window)
+        y_values.append(target[int(target_index)])
         dates.append(frame.index[target_index])
 
     return (

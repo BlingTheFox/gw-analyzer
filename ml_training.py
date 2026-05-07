@@ -70,7 +70,13 @@ def train_evaluate_hybrid(
     if not feature_columns:
         raise ValueError("Bitte mindestens ein Feature für das ML-Training aktivieren.")
     if len(x_values) < 30:
-        raise ValueError("Nicht genug Sequenzen für 60/20/20-Training, Test und Validierung.")
+        available_targets = int(np.isfinite(frame["target_residual"].astype(float).to_numpy()).sum())
+        raise ValueError(
+            "Nicht genug nutzbare Sequenzen für 60/20/20-Training, Test und Validierung. "
+            f"Diese Kombination braucht mindestens {window_size + horizon} Kalendertage "
+            f"Vorlauf bis zum Zielwert und genügend Messwerte danach. "
+            f"Nutzbare Zielwerte in der Station: {available_targets}, erzeugte Sequenzen: {len(x_values)}."
+        )
 
     n_sequences = len(x_values)
     train_end = int(n_sequences * 0.6)
