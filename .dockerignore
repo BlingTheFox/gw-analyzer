@@ -2,6 +2,7 @@
 .streamlit/secrets.toml
 .streamlit_run.*.log
 .upload_cache/
+.ml_run_cache/
 __pycache__/
 *.pyc
 *.pyo

@@ -1,14 +1,16 @@
 # ML- und Modellbegriffe: In-Depth-Info
 
-Dieses Dokument erklärt die wichtigsten Begriffe der CNN/LSTM-Test-Beta: was sie technisch machen, warum sie im Grundwasser-Kontext relevant sind, wann man sie nutzt und wann man vorsichtig sein sollte.
+Dieses Dokument erklärt die wichtigsten Begriffe der CNN/TCN/LSTM-Modelle: was sie technisch machen, warum sie im Grundwasser-Kontext relevant sind, wann man sie nutzt und wann man vorsichtig sein sollte.
 
-## Grundidee der ML-Beta
+## Grundidee der ML-Modelle
 
-Die ML-Beta vergleicht vier neuronale Varianten:
+Der ML-Bereich vergleicht sechs neuronale Varianten:
 
 - `Pastas + CNN`: Pastas simuliert den Grundwasserstand, CNN lernt nur den Restfehler.
+- `Pastas + TCN`: Pastas simuliert den Grundwasserstand, TCN lernt den Restfehler mit dilatierten Faltungen.
 - `Pastas + LSTM`: Pastas simuliert den Grundwasserstand, LSTM lernt nur den Restfehler.
 - `Nur CNN`: CNN sagt den Grundwasserstand direkt aus Wetterfeatures voraus.
+- `Nur TCN`: TCN sagt den Grundwasserstand direkt aus Wetterfeatures voraus.
 - `Nur LSTM`: LSTM sagt den Grundwasserstand direkt aus Wetterfeatures voraus.
 
 Der Hybridansatz ist meist hydrologisch besser interpretierbar, weil Pastas das physikalisch plausiblere Grundsignal liefert. Das neuronale Modell muss dann nur lernen, wo Pastas systematisch danebenliegt. Die Nur-ML-Varianten sind als direkter Vergleich wichtig: Sie zeigen, ob CNN/LSTM ohne Pastas-Basis überhaupt eine ähnliche oder bessere Güte erreichen.
@@ -29,7 +31,7 @@ Wann kleine Fenster sinnvoll sind:
 - schnelle Reaktion der Messstelle
 - kurze oder lückenhafte Zeitreihe
 - kurze Vorhersagehorizonte
-- erste Tests, um zu prüfen, ob ML überhaupt ein Signal findet
+- erste Prüfung, ob ML überhaupt ein Signal findet
 
 Wann lange Fenster sinnvoll sind:
 
@@ -60,11 +62,11 @@ Faustregel:
 
 Bei `30 Jahre Fenster + 20 Jahre Horizont` werden also mindestens 50 Jahre nutzbarer Zeitverlauf gebraucht. Danach müssen zusätzlich noch genug Zielwerte übrig bleiben, damit 60/20/20-Training, Test und Validierung funktionieren.
 
-Kurze Horizonte sind eher für direkte Reaktionsmuster geeignet. Lange Horizonte testen, ob das Modell langfristige Speicherwirkung und langsame Systemdynamik erkennt.
+Kurze Horizonte sind eher für direkte Reaktionsmuster geeignet. Lange Horizonte prüfen, ob das Modell langfristige Speicherwirkung und langsame Systemdynamik erkennt.
 
 ## 60/20/20-Split
 
-Die ML-Beta nutzt einen festen zeitlichen Split:
+Der ML-Bereich nutzt einen festen zeitlichen Split:
 
 - erste 60 Prozent: Training
 - nächste 20 Prozent: Test
@@ -281,12 +283,40 @@ Warum CNN für Grundwasser interessant ist:
 
 Niederschlag wirkt selten nur an einem einzelnen Tag. Häufig zählt die Struktur: mehrere Regentage, Vorfeuchte, Trockenphase davor, Verdunstungsphase danach. CNNs können solche lokalen Zeitmuster aus dem Eingabefenster herausfiltern.
 
-Wann CNN zuerst testen:
+Wann CNN zuerst nutzen:
 
 - wenn Training schnell sein soll
 - wenn die Station eher kurzfristig bis mittelfristig reagiert
 - wenn LSTM instabil wird
 - wenn viele Fenster/Horizonte verglichen werden sollen
+
+## TCN
+
+TCN bedeutet Temporal Convolutional Network. Es ist verwandt mit CNN, nutzt aber dilatierte Faltungen. Dilatiert heißt: Die Faltung schaut nicht nur auf direkt benachbarte Tage, sondern überspringt mit wachsendem Abstand einzelne Positionen. Dadurch kann das Modell längere Muster sehen, ohne dass das Netzwerk extrem tief oder langsam werden muss.
+
+Was TCN gut kann:
+
+- längere Reaktionszeiten robuster erfassen als ein einfaches CNN
+- Regen- und Trockenheitsmuster auf mehreren Zeitskalen erkennen
+- schneller und stabiler trainieren als viele LSTM-Setups
+- lokale Muster und weiter entfernte Abhängigkeiten kombinieren
+
+Warum TCN für Grundwasser interessant ist:
+
+Grundwasser reagiert oft nicht nur auf die letzten Tage, sondern auf länger aufgebaute Feuchte- oder Trockenheitszustände. Ein einfaches CNN erkennt lokale Muster gut, kann aber bei langen Verzögerungen zu kurz greifen. TCN erweitert diesen Blick durch Dilationen, ohne gleich die volle Empfindlichkeit eines LSTM zu haben.
+
+Wann TCN zuerst nutzen:
+
+- wenn CNN zu kurzsichtig wirkt
+- wenn LSTM instabil oder langsam trainiert
+- bei mittleren bis langen Trainingsfenstern
+- bei Stationen mit verzögerter, aber noch klar wettergetriebener Reaktion
+
+Worauf achten:
+
+- TCN kann trotzdem überfitten, wenn wenig Sequenzen vorhanden sind.
+- Bei sehr langen Fenstern bleibt die Datenmenge entscheidend.
+- Wenn TCN besser als CNN und LSTM validiert, ist das oft ein Hinweis auf mehrskalige Verzögerungsmuster.
 
 ## LSTM
 
@@ -471,6 +501,39 @@ Wichtig:
 
 Die Empfehlung ist kein garantierter globaler Bestwert. Der tatsächliche beste Wert wird erst sichtbar, wenn verschiedene Einstellungen trainiert und anhand der Validierung verglichen werden. Die Empfehlung soll einen sinnvollen Startpunkt liefern, damit man nicht blind mit zu großen oder zu kleinen Werten beginnt.
 
+## All-Station-ML-Lauf
+
+Die Option `Alle verfügbaren Stationen` geht alle Stationen durch, für die im letzten Pastas-Lauf ein erfolgreiches Modell ohne FlexModel vorhanden ist. Pro Station werden CNN, TCN und LSTM jeweils als Hybrid und als Nur-ML trainiert.
+
+Warum stationsweise:
+
+- reduziert RAM-Spitzen
+- verhindert, dass alle Modelle gleichzeitig CPU belegen
+- erlaubt Zwischenspeichern nach jeder erfolgreichen Station
+- macht lange Läufe robuster gegen App- oder Browser-Abbrüche
+
+Die App reduziert für diese Batchläufe die PyTorch-Threadzahl und trainiert Stationen sequenziell. Das ist absichtlich langsamer als maximale Parallelisierung, aber stabiler für normale Desktop-Arbeit.
+
+## ML-Zwischenspeicher
+
+Nach jeder erfolgreichen Station schreibt die App ein `.gwml`-Paket in `.ml_run_cache`. Dieses Paket enthält:
+
+- Validierungs-/Prüfdaten
+- Vergleichstabelle
+- trainierte Modellzustände
+- Metadaten zur Station und Konfiguration
+
+Wenn die App später abstürzt, ist nicht automatisch alles verloren. Im ML-Tab kann das zuletzt gespeicherte Paket aus dem Zwischenspeicher wieder geladen werden. Für vollständige Projektstände bleibt das `.gwproject`-Paket der bessere Export, weil es zusätzlich Originaldateien, Pastas-Ergebnisse, Forecasts und Einstellungen enthält.
+
+## Import und Export
+
+Es gibt zwei Pakettypen:
+
+- `.gwproject`: kompletter Projektstand mit Originaldateien, Pastas-Ergebnissen, ML-/Hybrid-Ergebnissen, Forecasts, Modellzuständen und Einstellungen.
+- `.gwml`: einzelnes ML-Laufpaket mit ML-Ergebnissen und trainierten neuronalen Modellzuständen.
+
+Das obere Import-/Export-Feld ist für den kompletten Arbeitsstand gedacht. Der ML-Tab kann zusätzlich `.gwml`-Pakete direkt importieren, damit einzelne ML-Läufe unabhängig wiederhergestellt oder verglichen werden können.
+
 ## Praktische Startstrategie
 
 1. Mit `5 Jahre` Fenster und `30` oder `90 Tage` Horizont starten.
@@ -507,4 +570,3 @@ Nur-ML besser als Hybrid:
 - Pastas-Basismodell passt eventuell schlecht
 - ML findet Muster, die Pastas nicht abbildet
 - Ergebnisse fachlich prüfen, nicht nur R2 betrachten
-

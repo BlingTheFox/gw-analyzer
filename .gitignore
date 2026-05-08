@@ -6,6 +6,7 @@ __pycache__/
 # Streamlit / local app state
 .streamlit/secrets.toml
 .upload_cache/
+.ml_run_cache/
 .streamlit_run.*.log
 
 # Virtual environments

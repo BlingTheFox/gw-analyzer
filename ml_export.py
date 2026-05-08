@@ -4,11 +4,34 @@ import io
 import json
 import zipfile
 from datetime import datetime
+from pathlib import PurePosixPath
 
 import pandas as pd
 
 from ml_models import build_model
 from ml_training import Standardizer
+
+
+MAX_ML_PACKAGE_BYTES = 250 * 1024 * 1024
+MAX_ML_ZIP_ENTRY_BYTES = 50 * 1024 * 1024
+MAX_ML_ZIP_ENTRIES = 100
+
+
+def validate_ml_zip_archive(archive: zipfile.ZipFile) -> None:
+    infos = archive.infolist()
+    if len(infos) > MAX_ML_ZIP_ENTRIES:
+        raise ValueError("ML package contains too many files.")
+
+    total_size = 0
+    for info in infos:
+        member_path = PurePosixPath(info.filename)
+        if member_path.is_absolute() or ".." in member_path.parts:
+            raise ValueError("ML package contains an unsafe path.")
+        if info.file_size > MAX_ML_ZIP_ENTRY_BYTES:
+            raise ValueError("ML package contains a file that is too large.")
+        total_size += int(info.file_size)
+        if total_size > MAX_ML_PACKAGE_BYTES:
+            raise ValueError("ML package is too large.")
 
 
 def ml_results_to_csv_bytes(df: pd.DataFrame) -> bytes:
@@ -104,7 +127,7 @@ def load_ml_artifacts_bytes(data: bytes) -> dict:
 
     buffer = io.BytesIO(data)
     try:
-        payload = torch.load(buffer, map_location="cpu", weights_only=False)
+        payload = torch.load(buffer, map_location="cpu", weights_only=True)
     except TypeError:
         buffer.seek(0)
         payload = torch.load(buffer, map_location="cpu")
@@ -150,3 +173,34 @@ def create_ml_run_package(
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def load_ml_run_package_bytes(data: bytes) -> dict:
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        validate_ml_zip_archive(archive)
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        files = manifest.get("files", {})
+
+        def read_csv(name: str) -> pd.DataFrame:
+            archive_path = files.get(name)
+            if not archive_path:
+                return pd.DataFrame()
+            with archive.open(archive_path) as handle:
+                df = pd.read_csv(handle, sep=";")
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            return df
+
+        artifacts = {}
+        if files.get("model"):
+            artifacts = load_ml_artifacts_bytes(archive.read(files["model"]))
+
+        return {
+            "manifest": manifest,
+            "metadata": manifest.get("metadata", {}),
+            "validation_df": read_csv("validation"),
+            "forecast_df": read_csv("forecast"),
+            "impulse_df": read_csv("impulse_response"),
+            "summary_df": read_csv("summary"),
+            "artifacts": artifacts,
+        }
